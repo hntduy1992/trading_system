@@ -1,0 +1,64 @@
+{
+  "session_id": "sess_20260909_163102",
+  "symbol": "XAUUSD",
+  "generated_at": "2026-09-09T09:31:02.163099+00:00",
+  "market_regime": "SIDEWAYS_RANGE",
+  "htf_zones": {
+    "resistance_zones": [
+      {
+        "id": "res_maj_1",
+        "high": 4412.81,
+        "low": 4407.06,
+        "significance": "MAJOR"
+      },
+      {
+        "id": "res_min_1",
+        "high": 4409.21,
+        "low": 4405.76,
+        "significance": "MINOR"
+      }
+    ],
+    "support_zones": [
+      {
+        "id": "sup_maj_1",
+        "high": 4346.7,
+        "low": 4340.95,
+        "significance": "MAJOR"
+      },
+      {
+        "id": "sup_min_1",
+        "high": 4388.52,
+        "low": 4385.07,
+        "significance": "MINOR"
+      }
+    ]
+  },
+  "setups_enabled": {
+    "TST": true,
+    "BOF": true,
+    "BPB": false,
+    "PB": false,
+    "CPB": false
+  },
+  "execution_rules": {
+    "min_rr_ratio_part1": 1.0,
+    "require_wholesale_entry": true,
+    "max_entry_timeout_bars_1m": 4,
+    "stall_min_candles": 3,
+    "scratch_timeout_bars_1m": 5,
+    "slippage_tolerance_pips": 0.5
+  },
+  "risk_management": {
+    "account_risk_limit_percent": 1.0,
+    "part1_risk_percent": 0.5,
+    "part2_risk_percent": 0.5,
+    "session_drawdown_timeout_percent": 2.0,
+    "session_drawdown_hardstop_percent": 3.0,
+    "business_drawdown_stop_percent": 20.0
+  },
+  "news_filter": {
+    "blackout_before_minutes": 15,
+    "blackout_after_minutes": 15,
+    "high_impact_events": []
+  }
+}

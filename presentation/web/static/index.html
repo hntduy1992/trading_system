@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YTC Price Action Trader (v2.1.0-STRICT)</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Lightweight Charts (TradingView) for ultra-fast multi-timeframe charts -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header>
+    <div class="logo-area">
+      <h2>YTC Price Action Trader</h2>
+      <span class="logo-tag">v2.1.0-STRICT</span>
+    </div>
+
+    <div class="status-bar">
+      <div class="status-item">
+        <span class="status-label">Symbol:</span>
+        <span id="stat-symbol" class="status-val">EURUSD</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Mode:</span>
+        <span id="stat-mode" class="status-val">Loading...</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Balance:</span>
+        <span id="stat-balance" class="status-val">$0.00</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Regime:</span>
+        <span id="stat-regime" class="status-val">SIDEWAYS_RANGE</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Port:</span>
+        <span class="status-val">A: 29120 | B: 29121</span>
+      </div>
+    </div>
+
+    <nav class="tab-nav">
+      <button class="tab-btn active" onclick="switchTab('server-a')">Server A (Execution)</button>
+      <button class="tab-btn" onclick="switchTab('server-b')">Server B (AI Brain & Audit)</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- TAB 1: SERVER A (EXECUTION & LIVE MONITOR) -->
+    <div id="tab-server-a" class="tab-pane active">
+      <!-- 3-Pane Synchronized Charts -->
+      <div class="charts-grid">
+        <div class="chart-card">
+          <div class="chart-header">
+            <span>HTF (M30) - Trend & S/R Zones</span>
+            <span id="badge-m30" style="color:#58a6ff;">SYNCED</span>
+          </div>
+          <div id="chart-m30" class="chart-container"></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-header">
+            <span>TTF (M3) - Trading Framework (Swings)</span>
+            <span id="badge-m3" style="color:#238636;">ACTIVE</span>
+          </div>
+          <div id="chart-m3" class="chart-container"></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-header">
+            <span>LTF (M1) - Micro Triggers (Stall/Wholesale)</span>
+            <span id="badge-m1" style="color:#e3b341;">STREAMING</span>
+          </div>
+          <div id="chart-m1" class="chart-container"></div>
+        </div>
+      </div>
+
+      <!-- Wholesale Order Radar (Vùng Theo Dõi Kỳ Vọng Khớp Lệnh) -->
+      <div class="card" style="margin-bottom: 2px; padding: 10px 14px; background: #161b22; border: 1px solid #30363d;">
+        <div class="card-title" style="margin-bottom: 6px;">
+          <span>🎯 VÙNG THEO DÕI KHỚP LỆNH KỲ VỌNG (WHOLESALE ORDER RADAR)</span>
+          <span id="radar-status-badge" style="background:#21262d; border: 1px solid #58a6ff; color:#58a6ff; padding:2px 8px; border-radius:4px; font-size:11px;">SCANNING</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; font-size: 12px; align-items: center;">
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #58a6ff;">
+            <div style="color:#8b949e; font-size:10px;">SETUP CANH VÀO</div>
+            <div id="radar-setup" style="font-weight:bold; color:#f0f6fc;">--</div>
+          </div>
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #58a6ff;">
+            <div style="color:#8b949e; font-size:10px;">GIÁ KỲ VỌNG (ENTRY)</div>
+            <div id="radar-entry" style="font-weight:bold; color:#58a6ff;">--</div>
+          </div>
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #da3633;">
+            <div style="color:#8b949e; font-size:10px;">DỪNG LỖ (SL - S1)</div>
+            <div id="radar-sl" style="font-weight:bold; color:#da3633;">--</div>
+          </div>
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #238636;">
+            <div style="color:#8b949e; font-size:10px;">CHỐT LỜI 1 (TP1)</div>
+            <div id="radar-tp1" style="font-weight:bold; color:#238636;">--</div>
+          </div>
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #3fb950;">
+            <div style="color:#8b949e; font-size:10px;">CHỐT LỜI 2 (TP2 HTF)</div>
+            <div id="radar-tp2" style="font-weight:bold; color:#3fb950;">--</div>
+          </div>
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #bc8cff;">
+            <div style="color:#8b949e; font-size:10px;">TRẦN R:R (LRP)</div>
+            <div id="radar-lrp" style="font-weight:bold; color:#bc8cff;">--</div>
+          </div>
+          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #e3b341;">
+            <div style="color:#8b949e; font-size:10px;">KHOẢNG CÁCH VÀO</div>
+            <div id="radar-dist" style="font-weight:bold; color:#e3b341;">--</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Lower Controls & Position Matrix -->
+      <div class="lower-grid">
+
+        <div class="card">
+          <div class="card-title">
+            <span>Active Positions & Orders Matrix</span>
+            <span id="position-count">0 Open</span>
+          </div>
+          <div style="overflow-x:auto; flex:1;">
+            <table id="positions-table">
+              <thead>
+                <tr>
+                  <th>Trade ID</th>
+                  <th>Setup</th>
+                  <th>Side</th>
+                  <th>State</th>
+                  <th>Lots (P1/P2)</th>
+                  <th>Entry</th>
+                  <th>SL</th>
+                  <th>TP</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="positions-tbody">
+                <tr><td colspan="9" style="text-align:center; color:#8b949e;">No active positions. Engine scanning for wholesale setups...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Emergency Panel -->
+          <div class="emergency-row">
+            <button class="btn btn-danger" onclick="panicCloseAll()">🚨 PANIC CLOSE ALL</button>
+            <button id="btn-pause" class="btn btn-warning" onclick="togglePause()">⏸ PAUSE NEW ENTRIES</button>
+            <button class="btn btn-primary" onclick="simulateTick()">⚡ SIMULATE TICK (TEST)</button>
+          </div>
+        </div>
+
+        <!-- Telemetry Log Stream -->
+        <div class="card">
+          <div class="card-title">
+            <span>Live Telemetry Stream (M1/M3/M30 FSM)</span>
+            <button class="btn btn-primary" style="padding:2px 8px; font-size:10px;" onclick="clearTelemetry()">Clear</button>
+          </div>
+          <div id="telemetry-log" class="terminal">
+            <div>[SYSTEM] Connected to EventBus telemetry on ws://127.0.0.1:29120/ws/telemetry</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: SERVER B (EVALUATION STUDIO, AI PLANNING & AUDIT) -->
+    <div id="tab-server-b" class="tab-pane">
+      <!-- AI Engine & API Key Configuration -->
+      <div class="card" style="padding: 12px 16px; background: #161b22; border: 1px solid #30363d; margin-bottom: 6px;">
+        <div class="card-title" style="margin-bottom: 8px;">
+          <span>⚙️ CẤU HÌNH AI API KEYS (GOOGLE GEMINI / OPENAI)</span>
+          <span id="ai-key-status" style="font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #21262d; color: #58a6ff;">Checking...</span>
+        </div>
+        <div style="display: grid; grid-template-columns: 1.2fr 2fr 1.5fr auto; gap: 10px; align-items: center; font-size: 12px;">
+          <div>
+            <label style="color:#8b949e; display:block; margin-bottom:4px;">Nhà cung cấp (Provider):</label>
+            <select id="ai-provider-select" onchange="onProviderChange()" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#f0f6fc; padding:6px; border-radius:4px;">
+              <option value="gemini">Google Gemini (Nhanh & Miễn phí)</option>
+              <option value="openai">OpenAI (GPT-4o)</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:#8b949e; display:block; margin-bottom:4px;">API Key:</label>
+            <input id="ai-api-key-input" type="password" placeholder="Dán API Key (AIzaSy... hoặc sk-...)" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#58a6ff; padding:6px 10px; border-radius:4px; font-family:monospace;" />
+          </div>
+          <div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <label style="color:#8b949e; margin-bottom:0;">Mô hình (Model):</label>
+              <button id="btn-fetch-models" type="button" onclick="fetchOnlineModels()" style="background:#21262d; border:1px solid #388bfd; color:#58a6ff; font-size:10px; padding:2px 7px; border-radius:3px; cursor:pointer;" title="Tìm và quét các model mới nhất từ Internet">🔄 Cập nhật từ Internet</button>
+            </div>
+            <select id="ai-model-select" onchange="onModelChange()" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#f0f6fc; padding:6px; border-radius:4px;">
+              <option value="gemini-2.0-flash">gemini-2.0-flash (Siêu tốc <1.5s - Khuyên dùng)</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro (Thế hệ 2.5 - Suy luận chuyên sâu)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (Thế hệ 2.5 - Nhanh & Thông minh)</option>
+              <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (Siêu nhẹ, tiết kiệm)</option>
+              <option value="gemini-2.0-flash-thinking-exp-01-21">gemini-2.0-flash-thinking (Tư duy chuỗi)</option>
+              <option value="gemini-2.0-pro-exp-02-05">gemini-2.0-pro-exp (Bản Pro thử nghiệm)</option>
+              <option value="gemini-1.5-pro">gemini-1.5-pro (Ổn định, Context 2M)</option>
+              <option value="gemini-1.5-flash">gemini-1.5-flash (Ổn định, chuẩn)</option>
+              <option value="gemini-1.5-flash-8b">gemini-1.5-flash-8b (Bản nhỏ)</option>
+              <option value="custom">✏️ Nhập model tùy chỉnh khác...</option>
+            </select>
+            <input id="ai-custom-model-input" type="text" placeholder="Nhập mã model (vd: gemini-2.5-pro)..." style="display:none; width:100%; margin-top:4px; background:#0d1117; border:1px solid #58a6ff; color:#58a6ff; padding:5px 8px; border-radius:4px; font-size:11px;" />
+          </div>
+          <div style="display:flex; align-self:flex-end;">
+            <button class="btn btn-primary" onclick="saveAIConfig()" style="height:32px;">💾 Lưu & Kích Hoạt Key</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="studio-grid">
+        <!-- Pre-Session Planning -->
+        <div class="card">
+
+          <div class="card-title">
+            <span>Pre-Session AI Strategy Planner</span>
+            <button class="btn btn-success" onclick="generateAIPlan()">⚡ Generate New AI Plan</button>
+          </div>
+          <p style="font-size:12px; color:#8b949e;">
+            Aggregates HTF/TTF rates, RAG past lessons, macroeconomic events, and generates schema-compliant <code>trading_config.json</code>.
+          </p>
+          <textarea id="ai-plan-json" class="json-view" placeholder="Click 'Generate New AI Plan' to invoke AI reasoning..."></textarea>
+          <div style="display:flex; justify-content:flex-end; gap:10px;">
+            <button class="btn btn-primary" onclick="deployPlanToServerA()">🚀 Approve & Deploy to Server A</button>
+          </div>
+        </div>
+
+        <!-- Post-Session Hindsight Audit -->
+        <div class="card">
+          <div class="card-title">
+            <span>Post-Session Hindsight Audit</span>
+            <button class="btn btn-primary" onclick="runHindsightAudit()">🔍 Run Audit</button>
+          </div>
+          <p style="font-size:12px; color:#8b949e;">
+            Lance Beggs 4 questions: Expectation vs Reality, Missed Setups, Compliance Score & Dynamic Self-Optimization.
+          </p>
+          <div id="audit-output" style="background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:12px; font-size:12px; flex:1; overflow-y:auto;">
+            <div style="color:#8b949e;">No audit executed yet for this session.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
