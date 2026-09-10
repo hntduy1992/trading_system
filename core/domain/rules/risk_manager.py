@@ -72,21 +72,32 @@ class RiskManager:
     @staticmethod
     def evaluate_scratch_rule(
         bars_in_trade: int,
-        scratch_timeout_bars: int = 5,
+        scratch_timeout_bars: int = 8,
         opposite_momentum_detected: bool = False,
-        lwp_orderflow_failed: bool = False
+        lwp_orderflow_failed: bool = False,
+        unrealized_r: float = 0.0,
+        price_progress_pct: float = 0.0
     ) -> Tuple[bool, str]:
         """
-        PREMISE_THREATENED (Scratch Rule):
-          - Bar counter >= scratch_timeout_bars without resolution.
-          - Opposite momentum bar closes beyond local MA / swing node.
-          - Trapped traders order flow fails to materialize upon LWP breach.
+        PREMISE_THREATENED (Dynamic Scratch Rule):
+          - Fast scratch: Opposite momentum bar closed beyond key node.
+          - Orderflow failure: Trapped traders order flow failed upon LWP breach.
+          - P&L Aware Timeout:
+            - If position has positive progress (unrealized_r >= 0.3 or progress >= 40%),
+              dynamically extend scratch timeout (e.g. up to 14 bars) to avoid premature exit.
+            - If position is stagnant or negative, scratch strictly at scratch_timeout_bars.
         """
-        if bars_in_trade >= scratch_timeout_bars:
-            return True, f"Scratch timeout reached: {bars_in_trade} bars without directional resolution."
         if opposite_momentum_detected:
             return True, "Premise threatened: Opposite momentum bar closed beyond key node."
         if lwp_orderflow_failed:
             return True, "Premise threatened: Trapped traders order flow failed upon LWP breach."
+
+        # Dynamic timeout extension if position is progressing in profit towards T1
+        effective_timeout = scratch_timeout_bars
+        if unrealized_r >= 0.3 or price_progress_pct >= 0.40:
+            effective_timeout = max(scratch_timeout_bars + 6, 14)
+
+        if bars_in_trade >= effective_timeout:
+            return True, f"Scratch timeout reached: {bars_in_trade} bars without directional resolution."
 
         return False, "PREMISE_INTACT"

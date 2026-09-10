@@ -141,6 +141,7 @@ class TradeLifecycle:
     last_bar_timestamp: Optional[float] = None
     anchor_id: Optional[str] = None
     close_time: Optional[float] = None
+    spatial_anchor_key: Optional[str] = None
 
 @dataclass
 class SessionConfig:
