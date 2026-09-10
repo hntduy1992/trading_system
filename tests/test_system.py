@@ -137,6 +137,48 @@ class TestYTCSystem(unittest.TestCase):
         self.assertAlmostEqual(lot_total, 0.17, delta=0.01)
         self.assertAlmostEqual(lot_p1 + lot_p2, lot_total, places=2)
 
+    def test_broker_get_terminal_status(self):
+        """Tests get_terminal_status on PaperBroker and MT5Broker."""
+        import asyncio
+        from infrastructure.brokers.paper_broker import PaperBroker
+        from infrastructure.brokers.mt5_broker import MT5Broker
+
+        paper = PaperBroker()
+        paper_status = asyncio.run(paper.get_terminal_status())
+        self.assertTrue(paper_status["auto_trading_ready"])
+        self.assertTrue(paper_status["trade_allowed"])
+
+        mt5_broker = MT5Broker()
+        mt5_status = asyncio.run(mt5_broker.get_terminal_status())
+        self.assertIn("auto_trading_ready", mt5_status)
+        self.assertIn("trade_allowed", mt5_status)
+
+    def test_manual_trade_and_modify(self):
+        """Tests manual placing and modifying of orders on broker."""
+        import asyncio
+        from infrastructure.brokers.paper_broker import PaperBroker
+        from core.domain.models import OrderSide
+
+        paper = PaperBroker()
+        ticket = asyncio.run(paper.place_order(
+            symbol="XAUUSD",
+            side=OrderSide.BUY,
+            order_type="MARKET",
+            volume=0.20,
+            price=2650.00,
+            sl=2645.00,
+            tp=2660.00
+        ))
+        self.assertIsNotNone(ticket)
+        self.assertIn(ticket, paper.orders)
+        self.assertEqual(paper.orders[ticket]["volume"], 0.20)
+
+        # Test modify SL/TP
+        mod_ok = asyncio.run(paper.modify_position(ticket, sl=2648.00, tp=2665.00))
+        self.assertTrue(mod_ok)
+        self.assertEqual(paper.orders[ticket]["sl"], 2648.00)
+        self.assertEqual(paper.orders[ticket]["tp"], 2665.00)
+
 if __name__ == "__main__":
     unittest.main()
 

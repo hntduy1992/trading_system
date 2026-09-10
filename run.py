@@ -11,7 +11,7 @@ import asyncio
 import argparse
 import signal
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # Ensure project root is in sys.path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,9 +39,10 @@ from presentation.api.server_a_api import create_server_a_app
 from presentation.api.server_b_api import create_server_b_app
 
 class SystemOrchestrator:
-    def __init__(self, mode: str = "paper", symbol: str = "XAUUSD"):
+    def __init__(self, mode: str = "paper", symbol: str = "XAUUSD", active_env_file: Optional[str] = None):
         self.mode = mode
         self.symbol = symbol
+        self.active_env_file = active_env_file or os.path.join(BASE_DIR, ".env")
 
         self.running = True
 
@@ -72,11 +73,20 @@ class SystemOrchestrator:
             self.broker = PaperBroker(initial_balance=10000.0, symbol=symbol)
 
         # AI Engine selection
-        if CONFIG.ai.GEMINI_API_KEY:
-            print("[INIT] Initializing Gemini AI Strategy Adapter...")
-            self.ai_engine = GeminiAIAdapter(api_key=CONFIG.ai.GEMINI_API_KEY, model_name=CONFIG.ai.MODEL_NAME)
+        ai_provider = os.getenv("AI_PROVIDER", CONFIG.ai.PROVIDER).lower()
+        gemini_key = os.getenv("GEMINI_API_KEY", CONFIG.ai.GEMINI_API_KEY)
+        openai_key = os.getenv("OPENAI_API_KEY", CONFIG.ai.OPENAI_API_KEY)
+        model_name = os.getenv("AI_MODEL_NAME", CONFIG.ai.MODEL_NAME)
+
+        if ai_provider == "openai" and openai_key:
+            from infrastructure.ai.openai_adapter import OpenAIAdapter
+            print(f"[INIT] Initializing OpenAI Strategy Adapter ({model_name})...")
+            self.ai_engine = OpenAIAdapter(api_key=openai_key, model_name=model_name)
+        elif ai_provider == "gemini" and gemini_key:
+            print(f"[INIT] Initializing Gemini AI Strategy Adapter ({model_name})...")
+            self.ai_engine = GeminiAIAdapter(api_key=gemini_key, model_name=model_name)
         else:
-            print("[INIT] Initializing Mock AI Strategy Adapter (Offline Deterministic)...")
+            print("[INIT] No valid AI API key detected or provider='mock'. Initializing Mock AI Strategy Adapter (Offline Deterministic)...")
             self.ai_engine = MockAIEngine()
 
         # 2. Dependency Injection: Use Cases
@@ -98,7 +108,8 @@ class SystemOrchestrator:
             planner=self.pre_planner,
             auditor=self.auditor,
             vector_store=self.vector_store,
-            json_store=self.json_store
+            json_store=self.json_store,
+            active_env_file=self.active_env_file
         )
 
     async def execution_engine_loop(self):
@@ -302,6 +313,16 @@ class SystemOrchestrator:
         print(f"  - WebSocket Telemetry:             ws://127.0.0.1:{server_a_port}/ws/telemetry")
         print("=" * 70 + "\n")
 
+        # Automatically open browser dashboard
+        async def _open_browser_when_ready():
+            await asyncio.sleep(1.2)
+            try:
+                import webbrowser
+                webbrowser.open(f"http://127.0.0.1:{server_a_port}")
+            except Exception:
+                pass
+        asyncio.create_task(_open_browser_when_ready())
+
         # Run all components concurrently
         await asyncio.gather(
             self.run_server_a(server_a_port),
@@ -317,24 +338,62 @@ class SystemOrchestrator:
 
 def main():
     parser = argparse.ArgumentParser(description="YTC Price Action Trader (v2.1.0-STRICT)")
-    parser.add_argument("--mode", choices=["paper", "live"], default="paper", help="Trading mode: 'paper' or 'live' (MT5)")
-    parser.add_argument("--symbol", default="XAUUSD", help="Symbol to trade (default: XAUUSD)")
-    parser.add_argument("--server-a-port", type=int, default=29120, help="Port for Server A & Dashboard (default: 29120)")
-
-    parser.add_argument("--server-b-port", type=int, default=29121, help="Port for Server B (default: 29121)")
+    parser.add_argument("--env", choices=["paper", "live"], default=None, help="Deployment environment to load (.env.paper or .env.live)")
+    parser.add_argument("--env-file", default=None, help="Explicit path to custom environment file")
+    parser.add_argument("--mode", choices=["paper", "live"], default=None, help="Trading mode: 'paper' (Simulation) or 'live' (MT5)")
+    parser.add_argument("--symbol", default=None, help="Symbol to trade (default from env or XAUUSD)")
+    parser.add_argument("--server-a-port", type=int, default=None, help="Port for Server A & Dashboard")
+    parser.add_argument("--server-b-port", type=int, default=None, help="Port for Server B")
     parser.add_argument("--no-auto-plan", action="store_true", help="Do not auto-generate plan on startup")
+    
+    # CLI API Key and AI options
+    parser.add_argument("--gemini-api-key", default=None, help="Google Gemini API Key override")
+    parser.add_argument("--openai-api-key", default=None, help="OpenAI API Key override")
+    parser.add_argument("--ai-provider", choices=["gemini", "openai", "mock"], default=None, help="AI Provider override")
+    parser.add_argument("--ai-model", default=None, help="AI Model name override")
+    parser.add_argument("--setup", action="store_true", help="Run interactive environment setup wizard before starting")
 
     args = parser.parse_args()
 
-    orchestrator = SystemOrchestrator(mode=args.mode, symbol=args.symbol)
+    # If --setup requested, run the wizard
+    if args.setup:
+        import setup_env
+        setup_env.run_wizard()
+
+    # Determine environment file to load
+    from config import reload_config, ACTIVE_ENV_FILE
+    chosen_env = args.env_file or args.env or args.mode or "paper"
+    cfg = reload_config(env_name_or_path=chosen_env, mode=args.mode or args.env)
+
+    # CLI overrides for API keys and provider
+    if args.gemini_api_key:
+        os.environ["GEMINI_API_KEY"] = args.gemini_api_key
+    if args.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = args.openai_api_key
+    if args.ai_provider:
+        os.environ["AI_PROVIDER"] = args.ai_provider
+    if args.ai_model:
+        os.environ["AI_MODEL_NAME"] = args.ai_model
+
+    # Resolve final mode, symbol, and ports from args or active config
+    from config import ACTIVE_ENV_FILE as resolved_env_file
+    final_mode = args.mode or args.env or cfg.broker.MODE or "paper"
+    final_symbol = args.symbol or cfg.broker.SYMBOL or "XAUUSD"
+    server_a_port = args.server_a_port or cfg.network.SERVER_A_PORT or 29120
+    server_b_port = args.server_b_port or cfg.network.SERVER_B_PORT or 29121
+
+    print(f"[CONFIG] Active Environment File: {resolved_env_file}")
+    print(f"[CONFIG] Mode: {final_mode.upper()} | Symbol: {final_symbol}")
+
+    orchestrator = SystemOrchestrator(mode=final_mode, symbol=final_symbol, active_env_file=resolved_env_file)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
         loop.run_until_complete(orchestrator.start(
-            server_a_port=args.server_a_port,
-            server_b_port=args.server_b_port,
+            server_a_port=server_a_port,
+            server_b_port=server_b_port,
             auto_plan=not args.no_auto_plan
         ))
     except (KeyboardInterrupt, SystemExit):

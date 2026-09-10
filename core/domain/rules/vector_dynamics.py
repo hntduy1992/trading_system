@@ -59,25 +59,26 @@ class MicroPatternDetector:
 
 
     @staticmethod
-    def detect_stall(bars_1m: List[Bar], min_candles: int = 3, atr_factor: float = 0.3) -> Tuple[bool, Optional[float], Optional[float]]:
+    def detect_stall(bars_1m: List[Bar], min_candles: int = 3, atr_factor: float = 1.5) -> Tuple[bool, Optional[float], Optional[float]]:
         """
-        Stall: >= min_candles consecutive bars overlapping within range <= 30% of local ATR.
+        Stall / Congestion: >= min_candles consecutive bars overlapping within reasonable local ATR consolidation.
         Returns: (is_stall, stall_low, stall_high)
         """
         if len(bars_1m) < min_candles:
+            if bars_1m:
+                return False, bars_1m[-1].low, bars_1m[-1].high
             return False, None, None
 
         recent_bars = bars_1m[-min_candles:]
         local_atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
-        max_allowed_range = local_atr * atr_factor
+        max_allowed_range = max(local_atr * atr_factor, 0.0001)
 
         stall_high = max(b.high for b in recent_bars)
         stall_low = min(b.low for b in recent_bars)
         actual_range = stall_high - stall_low
 
-        if actual_range <= max_allowed_range:
-            return True, stall_low, stall_high
-        return False, None, None
+        is_stall = (actual_range <= max_allowed_range)
+        return is_stall, stall_low, stall_high
 
     @staticmethod
     def detect_spring(bar: Bar, support_level: float) -> bool:

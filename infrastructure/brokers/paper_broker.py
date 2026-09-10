@@ -203,3 +203,17 @@ class PaperBroker(IBrokerGateway):
             self.orders[ticket]["tp"] = tp
             return True
         return False
+
+    async def get_terminal_status(self) -> Dict[str, Any]:
+        return {
+            "broker_type": "PaperBroker (Simulation)",
+            "connected": True,
+            "trade_allowed": True,
+            "account_trade_allowed": True,
+            "trade_expert": True,
+            "auto_trading_ready": True,
+            "account_login": "PAPER_DEMO",
+            "account_server": "Internal Simulation",
+            "account_name": "Virtual Account",
+            "message": "Môi trường giả lập (Paper Trading) luôn sẵn sàng tự động vào lệnh."
+        }

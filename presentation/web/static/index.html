@@ -36,6 +36,10 @@
         <span class="status-label">Port:</span>
         <span class="status-val">A: 29120 | B: 29121</span>
       </div>
+      <div class="status-item" style="display:flex; align-items:center;">
+        <span class="status-label">AutoTrading:</span>
+        <span id="stat-autotrading-badge" class="status-val" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #21262d; border: 1px solid #30363d;">CHECKING...</span>
+      </div>
     </div>
 
     <nav class="tab-nav">
@@ -47,6 +51,18 @@
   <main>
     <!-- TAB 1: SERVER A (EXECUTION & LIVE MONITOR) -->
     <div id="tab-server-a" class="tab-pane active">
+      <!-- Cảnh báo trạng thái AutoTrading khi bị tắt -->
+      <div id="autotrading-warning-banner" style="display:none; background: #3b1219; border: 1px solid #da3633; color: #f85149; padding: 10px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; align-items: center; justify-content: space-between;">
+        <div style="display:flex; align-items:center; gap: 10px;">
+          <span style="font-size: 18px;">⚠️</span>
+          <div>
+            <strong id="autotrading-warning-title">CẢNH BÁO: TÍNH NĂNG TỰ ĐỘNG GIAO DỊCH ĐANG BỊ TẮT!</strong>
+            <div id="autotrading-warning-desc" style="color: #c9d1d9; font-size: 12px; margin-top: 2px;">Vui lòng bấm vào nút 'Algo Trading' trên thanh công cụ phần mềm MT5 (chuyển sang màu Xanh lá) để bot có thể tự động vào lệnh.</div>
+          </div>
+        </div>
+        <button onclick="fetchStatus()" style="background:#21262d; border:1px solid #da3633; color:#f85149; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:11px;">Kiểm tra lại</button>
+      </div>
+
       <!-- 3-Pane Synchronized Charts -->
       <div class="charts-grid">
         <div class="chart-card">
@@ -141,11 +157,58 @@
             </table>
           </div>
 
-          <!-- Emergency Panel -->
-          <div class="emergency-row">
+          <!-- Emergency & Manual Execution Panel -->
+          <div class="emergency-row" style="flex-wrap: wrap; align-items:center;">
             <button class="btn btn-danger" onclick="panicCloseAll()">🚨 PANIC CLOSE ALL</button>
             <button id="btn-pause" class="btn btn-warning" onclick="togglePause()">⏸ PAUSE NEW ENTRIES</button>
             <button class="btn btn-primary" onclick="simulateTick()">⚡ SIMULATE TICK (TEST)</button>
+            <button class="btn btn-success" onclick="openOrderModal('BUY')">🟢 MỞ LỆNH BUY</button>
+            <button class="btn btn-danger" onclick="openOrderModal('SELL')">🔴 MỞ LỆNH SELL</button>
+          </div>
+        </div>
+
+        <!-- Cấu hình Khối lượng & Quản lý Rủi ro (Tự động hoặc Thủ công) -->
+        <div class="card" style="margin-bottom: 2px;">
+          <div class="card-title">
+            <span>⚙️ CẤU HÌNH KHỐI LƯỢNG (VOLUME) & SL / TP (THỦ CÔNG / GỢI Ý)</span>
+            <span id="risk-mode-badge" style="background:#21262d; border:1px solid #3fb950; color:#3fb950; padding:2px 8px; border-radius:4px; font-size:11px;">AUTO CALCULATED</span>
+          </div>
+          <div style="font-size: 12px; color: #8b949e; margin-bottom: 6px;">
+            Bạn có thể chọn <strong>dùng thông số hệ thống tự động tính toán (Gợi ý)</strong> hoặc <strong>cố định khối lượng Lot / SL / TP bằng tay</strong>.
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 12px; align-items: center;">
+            <div>
+              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                <label style="color:#8b949e;">Khối lượng Lot (Volume):</label>
+                <button type="button" class="badge-btn" onclick="applySuggestedLot()">Gợi ý</button>
+              </div>
+              <input id="cfg-volume-input" class="form-control" type="number" step="0.01" placeholder="Auto (1% rủi ro)" />
+            </div>
+            <div>
+              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                <label style="color:#8b949e;">% Rủi ro mỗi lệnh (%):</label>
+                <button type="button" class="badge-btn" onclick="document.getElementById('cfg-risk-pct-input').value = '1.0'">1.0%</button>
+              </div>
+              <input id="cfg-risk-pct-input" class="form-control" type="number" step="0.1" placeholder="1.0%" />
+            </div>
+            <div>
+              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                <label style="color:#8b949e;">Dừng lỗ cố định (SL):</label>
+                <button type="button" class="badge-btn" onclick="applySuggestedSL()">Gợi ý</button>
+              </div>
+              <input id="cfg-sl-input" class="form-control" type="number" step="0.01" placeholder="Auto (Kỹ thuật S1)" />
+            </div>
+            <div>
+              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                <label style="color:#8b949e;">Chốt lời cố định (TP1):</label>
+                <button type="button" class="badge-btn" onclick="applySuggestedTP()">Gợi ý</button>
+              </div>
+              <input id="cfg-tp-input" class="form-control" type="number" step="0.01" placeholder="Auto (Mục tiêu T1)" />
+            </div>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top: 8px;">
+            <button class="btn btn-warning" style="padding:4px 12px; font-size:11px;" onclick="resetRiskConfigToAuto()">🔄 Đặt lại về Gợi Ý Tự Động (Reset)</button>
+            <button class="btn btn-primary" style="padding:4px 14px; font-size:11px;" onclick="saveRiskConfig()">💾 Lưu Cấu Hình Khối Lượng & SL/TP</button>
           </div>
         </div>
 
@@ -240,6 +303,95 @@
       </div>
     </div>
   </main>
+
+  <!-- MODAL 1: ĐẶT LỆNH THỦ CÔNG (MANUAL ORDER MODAL) -->
+  <div id="modal-order" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+      <div class="modal-title">
+        <span id="modal-order-header">📈 MỞ LỆNH THỦ CÔNG (BUY/SELL)</span>
+        <button type="button" onclick="closeOrderModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:16px;">✕</button>
+      </div>
+
+      <div class="form-group">
+        <label>Loại lệnh (Order Type):</label>
+        <select id="modal-order-type" class="form-control" onchange="onOrderTypeChange()">
+          <option value="MARKET">MARKET (Khớp ngay theo giá thị trường)</option>
+          <option value="LIMIT">LIMIT (Chờ mua thấp / bán cao)</option>
+          <option value="STOP">STOP (Chờ phá vỡ theo đà)</option>
+        </select>
+      </div>
+
+      <div class="form-group" id="grp-order-price" style="display:none;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <label>Giá đặt lệnh (Entry Price):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderPrice()">Lấy giá gợi ý</button>
+        </div>
+        <input id="modal-order-price" class="form-control" type="number" step="0.01" placeholder="Nhập giá chờ..." />
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <label>Khối lượng (Volume / Lot):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderLot()">Lấy Lot gợi ý</button>
+        </div>
+        <input id="modal-order-volume" class="form-control" type="number" step="0.01" value="0.01" />
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <label>Dừng lỗ (Stop Loss - SL):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderSL()">Lấy SL gợi ý</button>
+        </div>
+        <input id="modal-order-sl" class="form-control" type="number" step="0.01" placeholder="Tùy chọn hoặc theo gợi ý..." />
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <label>Chốt lời (Take Profit - TP):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderTP()">Lấy TP gợi ý</button>
+        </div>
+        <input id="modal-order-tp" class="form-control" type="number" step="0.01" placeholder="Tùy chọn hoặc theo gợi ý..." />
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+        <button type="button" class="btn btn-warning" onclick="closeOrderModal()">Hủy bỏ</button>
+        <button id="modal-order-submit" type="button" class="btn btn-success" onclick="submitManualOrder()">🚀 Xác Nhận Đặt Lệnh</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2: ĐIỀU CHỈNH SL / TP VỊ THẾ ĐANG CHẠY (MODIFY POSITION MODAL) -->
+  <div id="modal-modify" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+      <div class="modal-title">
+        <span>✏️ ĐIỀU CHỈNH SL / TP CHO TICKET #<span id="mod-ticket-label">--</span></span>
+        <button type="button" onclick="closeModifyModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:16px;">✕</button>
+      </div>
+
+      <input type="hidden" id="mod-ticket-input" />
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <label>Mức dừng lỗ mới (New SL):</label>
+          <button type="button" class="badge-btn" onclick="fillModBreakeven()">Dời về Hòa vốn (BE)</button>
+        </div>
+        <input id="mod-sl-input" class="form-control" type="number" step="0.01" />
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <label>Mức chốt lời mới (New TP):</label>
+          <button type="button" class="badge-btn" onclick="fillModSuggestedTP()">TP Gợi ý</button>
+        </div>
+        <input id="mod-tp-input" class="form-control" type="number" step="0.01" />
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+        <button type="button" class="btn btn-warning" onclick="closeModifyModal()">Hủy bỏ</button>
+        <button type="button" class="btn btn-primary" onclick="submitModifyPosition()">💾 Cập Nhật SL/TP MT5</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

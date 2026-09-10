@@ -39,9 +39,12 @@ def create_server_b_app(
     planner: PreSessionPlannerUseCase,
     auditor: HindsightAuditorUseCase,
     vector_store: IVectorStore,
-    json_store: LocalJsonStore
+    json_store: LocalJsonStore,
+    active_env_file: Optional[str] = None
 ) -> FastAPI:
     app = FastAPI(title="Server B - AI Evaluation & Planning Studio", version="2.1.0-STRICT")
+    from config import ACTIVE_ENV_FILE
+    target_env_file = active_env_file or ACTIVE_ENV_FILE
 
     app.add_middleware(
         CORSMiddleware,
@@ -97,7 +100,7 @@ def create_server_b_app(
         key = req.api_key.strip()
         model = req.model_name.strip()
 
-        env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
+        env_file = target_env_file
 
         if provider == "gemini":
             os.environ["AI_PROVIDER"] = "gemini"
@@ -123,16 +126,42 @@ def create_server_b_app(
             current_ai["model_name"] = model or "gpt-4o"
             current_ai["has_openai_key"] = bool(key or os.getenv("OPENAI_API_KEY", ""))
 
-        # Update .env file on disk
+        # Update environment file on disk while preserving other configuration keys
         try:
+            existing_lines = []
+            if os.path.exists(env_file):
+                with open(env_file, "r", encoding="utf-8") as f:
+                    existing_lines = f.readlines()
+
+            keys_to_update = {
+                "AI_PROVIDER": current_ai["provider"],
+                "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
+                "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+                "AI_MODEL_NAME": current_ai["model_name"]
+            }
+
+            updated_lines = []
+            handled_keys = set()
+            for line in existing_lines:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    k, _ = stripped.split("=", 1)
+                    k = k.strip()
+                    if k in keys_to_update:
+                        updated_lines.append(f"{k}={keys_to_update[k]}\n")
+                        handled_keys.add(k)
+                        continue
+                updated_lines.append(line if line.endswith("\n") else line + "\n")
+
+            for k, v in keys_to_update.items():
+                if k not in handled_keys:
+                    updated_lines.append(f"{k}={v}\n")
+
             with open(env_file, "w", encoding="utf-8") as f:
-                f.write(f"AI_PROVIDER={current_ai['provider']}\n")
-                f.write(f"GEMINI_API_KEY={os.getenv('GEMINI_API_KEY', '')}\n")
-                f.write(f"OPENAI_API_KEY={os.getenv('OPENAI_API_KEY', '')}\n")
-                f.write(f"AI_MODEL_NAME={current_ai['model_name']}\n")
-                f.write(f"SYMBOL={os.getenv('SYMBOL', 'XAUUSD')}\n")
+                f.writelines(updated_lines)
+            print(f"[Server B] Successfully saved AI configuration to {env_file}")
         except Exception as e:
-            print(f"[Server B] Could not save .env: {e}")
+            print(f"[Server B] Could not save {env_file}: {e}")
 
         return {
             "status": "SUCCESS",

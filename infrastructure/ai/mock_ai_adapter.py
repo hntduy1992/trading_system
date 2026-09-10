@@ -25,45 +25,96 @@ class MockAIEngine(IAIEngine):
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         session_id = f"sess_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # Determine regime based on recent M30 rates
-        regime = MarketRegime.SIDEWAYS_RANGE
-
-        from core.domain.models import get_instrument_profile
+        # Determine regime and trend based on recent M3 and M30 rates
+        from core.domain.models import Bar, get_instrument_profile
+        from core.domain.rules.swing_detector import SwingDetector
         profile = get_instrument_profile(symbol)
 
-        # Determine current market price and session extremes from recent M30/M3 rates
         m30_list = recent_rates_json.get("M30", [])
         m3_list = recent_rates_json.get("M3", [])
 
-        if m30_list:
-            curr_price = m3_list[-1]["c"] if m3_list else m30_list[-1]["c"]
-            session_high = max(b["h"] for b in m30_list)
-            session_low = min(b["l"] for b in m30_list)
-            zone_width = max((session_high - session_low) * 0.08, curr_price * 0.001)
+        bars_m30 = [Bar(timestamp=b["time"], open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=100, timeframe="M30") for b in m30_list]
+        bars_m3 = [Bar(timestamp=b["time"], open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=100, timeframe="M3") for b in m3_list]
+
+        if m3_list:
+            curr_price = m3_list[-1]["c"]
+        elif m30_list:
+            curr_price = m30_list[-1]["c"]
         else:
             curr_price = profile.base_price
-            session_high = curr_price + 20.0
-            session_low = curr_price - 20.0
-            zone_width = curr_price * 0.001
+
+        # Detect trend on M3 TTF
+        swings_3m = SwingDetector.detect_swings(bars_m3) if bars_m3 else []
+        trend_str = SwingDetector.evaluate_trend(swings_3m, curr_price) if swings_3m else "SIDEWAYS"
+
+        if "UPTREND" in trend_str or "DOWNTREND" in trend_str:
+            regime = MarketRegime.TRENDING_STEADY
+            setups_enabled = {
+                "TST": False,
+                "BOF": False,
+                "BPB": True,
+                "PB": True,
+                "CPB": True
+            }
+        elif "SIDEWAYS" in trend_str:
+            regime = MarketRegime.SIDEWAYS_RANGE
+            setups_enabled = {
+                "TST": True,
+                "BOF": True,
+                "BPB": False,
+                "PB": False,
+                "CPB": False
+            }
+        else:
+            # Choppy / Undetermined: enable all active setups to catch valid PA triggers
+            regime = MarketRegime.SIDEWAYS_RANGE
+            setups_enabled = {
+                "TST": True,
+                "BOF": True,
+                "BPB": True,
+                "PB": True,
+                "CPB": True
+            }
 
         digits = profile.digits
 
-        # Major Resistance at session high
+        if m30_list:
+            session_high = max(b["h"] for b in m30_list)
+            session_low = min(b["l"] for b in m30_list)
+            zone_width = max((session_high - session_low) * 0.05, profile.sr_proximity_points * 1.5)
+        else:
+            session_high = curr_price + profile.default_t2_points
+            session_low = curr_price - profile.default_t2_points
+            zone_width = profile.sr_proximity_points * 1.5
+
+        # Extract real structural S/R zones from M30 / M3 swings
+        swings_30m = SwingDetector.detect_swings(bars_m30) if bars_m30 else []
+        sh_above = [s for s in (swings_30m or swings_3m) if s.price > curr_price]
+        sl_below = [s for s in (swings_30m or swings_3m) if s.price < curr_price]
+
+        # Resistance zones
+        if sh_above:
+            nearest_sh = min(sh_above, key=lambda s: s.price)
+            res_min_high = round(nearest_sh.price + zone_width * 0.3, digits)
+            res_min_low = round(nearest_sh.price - zone_width * 0.3, digits)
+        else:
+            res_min_low = round(curr_price + profile.sr_proximity_points * 2, digits)
+            res_min_high = round(res_min_low + zone_width, digits)
+
         res_maj_high = round(session_high, digits)
         res_maj_low = round(session_high - zone_width, digits)
 
-        # Minor Resistance above current price
-        min_offset = max(zone_width * 1.5, 4.0 if "XAU" in symbol.upper() else 0.0010)
-        res_min_low = round(curr_price + min_offset, digits)
-        res_min_high = round(res_min_low + (zone_width * 0.6), digits)
+        # Support zones
+        if sl_below:
+            nearest_sl = max(sl_below, key=lambda s: s.price)
+            sup_min_high = round(nearest_sl.price + zone_width * 0.3, digits)
+            sup_min_low = round(nearest_sl.price - zone_width * 0.3, digits)
+        else:
+            sup_min_high = round(curr_price - profile.sr_proximity_points * 2, digits)
+            sup_min_low = round(sup_min_high - zone_width, digits)
 
-        # Minor Support below current price
-        sup_min_high = round(curr_price - min_offset, digits)
-        sup_min_low = round(sup_min_high - (zone_width * 0.6), digits)
-
-        # Major Support at session low
-        sup_maj_high = round(session_low + zone_width, digits)
         sup_maj_low = round(session_low, digits)
+        sup_maj_high = round(session_low + zone_width, digits)
 
         res_zones = [
             HTFZone(id="res_maj_1", high=res_maj_high, low=res_maj_low, significance=Significance.MAJOR, zone_type="RESISTANCE"),
@@ -73,17 +124,6 @@ class MockAIEngine(IAIEngine):
             HTFZone(id="sup_maj_1", high=sup_maj_high, low=sup_maj_low, significance=Significance.MAJOR, zone_type="SUPPORT"),
             HTFZone(id="sup_min_1", high=sup_min_high, low=sup_min_low, significance=Significance.MINOR, zone_type="SUPPORT")
         ]
-
-
-        # Enabled Setups based on Lance Beggs Matrix for SIDEWAYS_RANGE:
-        # SIDEWAYS_RANGE: Enable TST, BOF. Disable PB.
-        setups_enabled = {
-            "TST": True,
-            "BOF": True,
-            "BPB": False,
-            "PB": False,
-            "CPB": False
-        }
 
         execution_rules = {
             "min_rr_ratio_part1": 1.0,
