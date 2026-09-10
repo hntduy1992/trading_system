@@ -20,6 +20,73 @@ def _calc_thresholds(bars_1m: List[Bar], profile: Optional[InstrumentProfile] = 
         t2_dist = max(last_price * 0.0040, atr * 3.5)
     return prox, t1_dist, t2_dist
 
+def _is_tst_reaction(bars_1m: List[Bar], side: OrderSide, atr: float) -> bool:
+    """
+    Verifies that market is rejecting the S/R zone with price action (Wick or Directional Close)
+    rather than flatlining or aggressively piercing through without absorption.
+    """
+    if not bars_1m:
+        return False
+    curr_bar = bars_1m[-1]
+    bar_range = curr_bar.high - curr_bar.low
+
+    if side == OrderSide.BUY:
+        # Rejection from Support:
+        # 1. Lower wick >= 28% of candle range (buyers absorbing sellers)
+        lower_wick = min(curr_bar.open, curr_bar.close) - curr_bar.low
+        if bar_range > 0 and (lower_wick / bar_range) >= 0.28:
+            return True
+        # 2. Bullish candle close above open
+        if curr_bar.close > curr_bar.open:
+            if len(bars_1m) < 2 or curr_bar.close >= bars_1m[-2].close:
+                return True
+        # 3. Check prior bar if current bar is consolidating at zone high
+        if len(bars_1m) >= 2:
+            prev_bar = bars_1m[-2]
+            prev_range = prev_bar.high - prev_bar.low
+            prev_lower_wick = min(prev_bar.open, prev_bar.close) - prev_bar.low
+            if prev_range > 0 and (prev_lower_wick / prev_range) >= 0.35 and curr_bar.close >= prev_bar.low:
+                return True
+        return False
+    else:
+        # Rejection from Resistance:
+        # 1. Upper wick >= 28% of candle range (sellers absorbing buyers)
+        upper_wick = curr_bar.high - max(curr_bar.open, curr_bar.close)
+        if bar_range > 0 and (upper_wick / bar_range) >= 0.28:
+            return True
+        # 2. Bearish candle close below open
+        if curr_bar.close < curr_bar.open:
+            if len(bars_1m) < 2 or curr_bar.close <= bars_1m[-2].close:
+                return True
+        # 3. Check prior bar
+        if len(bars_1m) >= 2:
+            prev_bar = bars_1m[-2]
+            prev_range = prev_bar.high - prev_bar.low
+            prev_upper_wick = prev_bar.high - max(prev_bar.open, prev_bar.close)
+            if prev_range > 0 and (prev_upper_wick / prev_range) >= 0.35 and curr_bar.close <= prev_bar.high:
+                return True
+        return False
+
+def _is_post_expansion_exhausted(bars_1m: List[Bar], side: OrderSide, atr: float) -> bool:
+    """
+    Prevents blind counter-trend fading if the market just arrived at the zone via
+    a massive momentum expansion bar without any sign of stalling/exhaustion.
+    """
+    if len(bars_1m) < 2 or atr <= 0:
+        return False
+    prev_bar = bars_1m[-2]
+    prev_range = prev_bar.high - prev_bar.low
+    if prev_range >= 2.2 * atr:
+        if side == OrderSide.SELL and prev_bar.close > prev_bar.open:
+            upper_wick = prev_bar.high - prev_bar.close
+            if prev_range > 0 and (upper_wick / prev_range) < 0.15:
+                return True
+        elif side == OrderSide.BUY and prev_bar.close < prev_bar.open:
+            lower_wick = prev_bar.close - prev_bar.low
+            if prev_range > 0 and (lower_wick / prev_range) < 0.15:
+                return True
+    return False
+
 class TSTSetup(BaseSetup):
     """Test of Support/Resistance (Range Trading)"""
     def __init__(self):
@@ -40,10 +107,15 @@ class TSTSetup(BaseSetup):
         curr_bar = bars_1m[-1]
         curr_price = curr_bar.close
         prox, t1_dist, t2_dist = _calc_thresholds(bars_1m, profile)
+        atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
 
         # Check Test of Support -> BUY
         for sup in support_zones:
             if sup.contains(curr_price) or abs(curr_price - sup.high) <= prox:
+                if _is_post_expansion_exhausted(bars_1m, OrderSide.BUY, atr):
+                    continue
+                if not _is_tst_reaction(bars_1m, OrderSide.BUY, atr):
+                    continue
                 recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
                 t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
                 t2 = resistance_zones[0].low if resistance_zones else (curr_price + t2_dist)
@@ -53,6 +125,10 @@ class TSTSetup(BaseSetup):
         # Check Test of Resistance -> SELL
         for res in resistance_zones:
             if res.contains(curr_price) or abs(curr_price - res.low) <= prox:
+                if _is_post_expansion_exhausted(bars_1m, OrderSide.SELL, atr):
+                    continue
+                if not _is_tst_reaction(bars_1m, OrderSide.SELL, atr):
+                    continue
                 recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
                 t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
                 t2 = support_zones[0].high if support_zones else (curr_price - t2_dist)

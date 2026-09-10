@@ -140,9 +140,24 @@ class ManageLifecycleUseCase:
         # 3. Check Scratch Rule (Premise Threatened)
         # Only evaluate scratch if trade has had minimum safe holding time to breathe
         if trade.m1_bars_in_trade >= min_holding_bars and trade.state == PositionState.IN_POSITION:
+            risk_dist = abs(trade.part1.entry_price - trade.part1.sl_price)
+            t1_dist = abs(trade.part1.tp_price - trade.part1.entry_price)
+            if trade.side == OrderSide.BUY:
+                profit_dist = curr_price - trade.part1.entry_price
+                opp_momentum = (curr_bar.close < curr_bar.open) and (curr_bar.close < trade.part1.entry_price) and (risk_dist > 0 and (trade.part1.entry_price - curr_price) >= 0.55 * risk_dist)
+            else:
+                profit_dist = trade.part1.entry_price - curr_price
+                opp_momentum = (curr_bar.close > curr_bar.open) and (curr_bar.close > trade.part1.entry_price) and (risk_dist > 0 and (curr_price - trade.part1.entry_price) >= 0.55 * risk_dist)
+
+            unrealized_r = profit_dist / risk_dist if risk_dist > 0 else 0.0
+            price_progress = profit_dist / t1_dist if t1_dist > 0 else 0.0
+
             is_scratch, scratch_reason = RiskManager.evaluate_scratch_rule(
                 bars_in_trade=trade.m1_bars_in_trade,
-                scratch_timeout_bars=scratch_timeout_bars
+                scratch_timeout_bars=scratch_timeout_bars,
+                opposite_momentum_detected=opp_momentum,
+                unrealized_r=unrealized_r,
+                price_progress_pct=price_progress
             )
             if is_scratch:
                 trade.state = PositionState.SCRATCHED

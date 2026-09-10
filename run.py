@@ -116,6 +116,37 @@ class SystemOrchestrator:
             active_env_file=self.active_env_file
         )
 
+    async def _trigger_async_replan(self, session_cfg: SessionConfig, reason: str):
+        """Tier 2 Async AI Re-Plan: Runs in background without blocking Server A execution."""
+        if getattr(self.session_manager, "is_replanning", False):
+            return
+        self.session_manager.is_replanning = True
+        try:
+            await self.event_bus.publish("telemetry", {
+                "type": "ASYNC_REPLAN_STARTED",
+                "reason": reason
+            })
+            new_plan = await self.pre_planner.execute(self.symbol, [], session_tag=session_cfg.session_tag)
+            self.state["session_config_obj"] = new_plan
+            self.state["session_config"] = {
+                "session_id": new_plan.session_id,
+                "symbol": new_plan.symbol,
+                "market_regime": new_plan.market_regime.value,
+                "setups_enabled": new_plan.setups_enabled,
+                "session_tag": new_plan.session_tag
+            }
+            await self.event_bus.publish("telemetry", {
+                "type": "SESSION_PLAN_RELOADED",
+                "session_tag": new_plan.session_tag,
+                "regime": new_plan.market_regime.value,
+                "reason": "AI Re-Plan Completed after Zone Breach"
+            })
+            print(f"[ZONE_MONITOR] New AI Session Plan active! New Regime: {new_plan.market_regime.value}")
+        except Exception as e:
+            print(f"[ZONE_MONITOR ERROR] Async AI Re-Plan failed: {e}")
+        finally:
+            self.session_manager.is_replanning = False
+
     async def execution_engine_loop(self):
         """
         Server A Real-time Deterministic Execution Loop:
@@ -196,7 +227,27 @@ class SystemOrchestrator:
                         self.state["closed_trades"].append(trade)
                         print(f"[ENGINE] Trade Finalized: {trade.trade_id} [{trade.state.value}]. Post-Trade Cooldown Active.")
 
-                # 3. Evaluate new setup entry
+                # 3. Zone Monitor & S/R Role Reversal (Tier 1 Local Reflex & Tier 2 AI Trigger)
+                from core.domain.rules.zone_monitor import ZoneMonitor
+                from core.domain.models import get_instrument_profile
+                profile = get_instrument_profile(self.symbol)
+
+                # Tier 1: Local S/R Role Reversal when M3 candle confirms breach
+                if latest_m3 and session_cfg:
+                    breach_res = ZoneMonitor.evaluate_zone_breaches(latest_m3, session_cfg, profile)
+                    if breach_res["has_flipped"]:
+                        for ev in breach_res["events"]:
+                            await self.event_bus.publish("telemetry", ev)
+                            print(f"[ZONE_MONITOR] {ev['action']} at {ev['price_level']:.2f}! Market Regime: {session_cfg.market_regime.value}")
+
+                # Tier 2: Async AI Re-Plan when M30 confirms session boundary breakout
+                if latest_m30 and session_cfg and not getattr(self.session_manager, "is_replanning", False):
+                    should_replan, replan_reason = ZoneMonitor.should_trigger_ai_replan(latest_m30, session_cfg, profile)
+                    if should_replan:
+                        print(f"[ZONE_MONITOR] Session Boundary Breach! Triggering Tier 2 Async AI Re-Plan: {replan_reason}")
+                        asyncio.create_task(self._trigger_async_replan(session_cfg, replan_reason))
+
+                # 4. Evaluate new setup entry
                 new_trade = await self.evaluate_entry.execute(
                     config=session_cfg,
                     bars_m30=m30_bars,

@@ -425,6 +425,161 @@ class TestYTCSystem(unittest.TestCase):
         sm.mark_replan_completed(status.session_tag)
         self.assertFalse(sm.should_trigger_auto_replan(status, current_cfg=None))
 
+    def test_tst_rejection_confirmation(self):
+        """Tests that TSTSetup requires price action confirmation (wick/close) rather than blind touch."""
+        from core.domain.models import HTFZone, Significance, SwingNode, SwingType
+        from core.domain.rules.setups.setups import TSTSetup
+
+        tst = TSTSetup()
+        sup = HTFZone("SUP1", high=2640.0, low=2638.0, significance=Significance.MAJOR)
+
+        # Case 1: Blind touch - strong bear candle into support with 0 lower wick
+        bars_unconfirmed = [
+            Bar(100, 2642.0, 2642.0, 2639.0, 2639.0) # open=2642, low=close=2639 -> lower wick = 0
+        ]
+        swings = [SwingNode(SwingType.SWING_HIGH, 2650.0, 100, 0, bars_unconfirmed[0])]
+        triggered, side, pullback, t1, t2 = tst.evaluate(
+            trend="RANGE", swings_3m=swings, bars_1m=bars_unconfirmed,
+            resistance_zones=[], support_zones=[sup]
+        )
+        self.assertFalse(triggered)
+
+        # Case 2: Confirmed reaction - candle with significant lower wick (rejection)
+        bars_confirmed = [
+            Bar(100, 2640.0, 2640.5, 2638.5, 2640.2) # low=2638.5, open=2640.0, close=2640.2 -> lower wick = 1.5 / range 2.0 = 75%
+        ]
+        triggered, side, pullback, t1, t2 = tst.evaluate(
+            trend="RANGE", swings_3m=swings, bars_1m=bars_confirmed,
+            resistance_zones=[], support_zones=[sup]
+        )
+        self.assertTrue(triggered)
+        self.assertEqual(side, OrderSide.BUY)
+
+    def test_dynamic_scratch_rules(self):
+        """Tests dynamic scratch rules: P&L extension and fast opposite momentum cut."""
+        # Case A: 8 bars stagnant at entry -> Scratch
+        scratch, reason = RiskManager.evaluate_scratch_rule(
+            bars_in_trade=8, scratch_timeout_bars=8, unrealized_r=0.0
+        )
+        self.assertTrue(scratch)
+        self.assertIn("Scratch timeout", reason)
+
+        # Case B: 8 bars but trade is in profit (+0.5R) -> Extended, DO NOT scratch
+        scratch, reason = RiskManager.evaluate_scratch_rule(
+            bars_in_trade=8, scratch_timeout_bars=8, unrealized_r=0.5
+        )
+        self.assertFalse(scratch)
+
+        # Case C: 14 bars in trade -> Even in profit, maximum holding reached
+        scratch, reason = RiskManager.evaluate_scratch_rule(
+            bars_in_trade=14, scratch_timeout_bars=8, unrealized_r=0.5
+        )
+        self.assertTrue(scratch)
+
+        # Case D: Fast scratch at bar 3 due to aggressive opposite momentum
+        scratch, reason = RiskManager.evaluate_scratch_rule(
+            bars_in_trade=3, scratch_timeout_bars=8, opposite_momentum_detected=True
+        )
+        self.assertTrue(scratch)
+        self.assertIn("Opposite momentum", reason)
+
+    def test_spatial_anchor_and_max_retries(self):
+        """Tests that reaching max_retries_per_zone locks out repeated entries at the same price zone."""
+        from core.domain.models import TradeLifecycle, PositionPart, PositionState, SetupType
+        from core.use_cases.execution.evaluate_entry import EvaluateEntryUseCase
+        from core.domain.interfaces.broker import IBrokerGateway
+        from core.domain.interfaces.event_bus import IEventBus
+        from unittest.mock import AsyncMock, MagicMock
+        import time
+
+        broker = MagicMock(spec=IBrokerGateway)
+        bus = MagicMock(spec=IEventBus)
+        use_case = EvaluateEntryUseCase(broker, bus)
+
+        # Simulate 2 consecutive scratch trades at the same zone 2640.0
+        trade1 = TradeLifecycle(
+            trade_id="t1", symbol="XAUUSD", setup_type=SetupType.TST, side=OrderSide.BUY,
+            state=PositionState.SCRATCHED,
+            part1=PositionPart(1, 0.01, 2640.0, 2638.0, 2645.0),
+            part2=PositionPart(2, 0.01, 2640.0, 2638.0, 2650.0),
+            open_time=time.time() - 600, close_time=time.time() - 500,
+            spatial_anchor_key="TST_BUY_2640.0"
+        )
+        trade2 = TradeLifecycle(
+            trade_id="t2", symbol="XAUUSD", setup_type=SetupType.TST, side=OrderSide.BUY,
+            state=PositionState.SCRATCHED,
+            part1=PositionPart(1, 0.01, 2640.0, 2638.0, 2645.0),
+            part2=PositionPart(2, 0.01, 2640.0, 2638.0, 2650.0),
+            open_time=time.time() - 400, close_time=time.time() - 300,
+            spatial_anchor_key="TST_BUY_2640.0"
+        )
+        use_case.record_trade_closed(trade1)
+        use_case.record_trade_closed(trade2)
+
+        # Verify zone scratch history records 2 scratches
+        self.assertEqual(len(use_case.zone_scratch_history.get("TST_BUY_2640.0", [])), 2)
+
+    def test_zone_breach_and_role_reversal(self):
+        """Tests Tier 1 Local Reflex: Resistance breach triggers Role Reversal to Support and updates regime."""
+        from core.domain.models import HTFZone, Significance, SessionConfig, MarketRegime
+        from core.domain.rules.zone_monitor import ZoneMonitor
+
+        config = SessionConfig(
+            session_id="s1", symbol="XAUUSD", generated_at="2026-09-10",
+            market_regime=MarketRegime.SIDEWAYS_RANGE,
+            resistance_zones=[HTFZone("RES_1", high=2650.0, low=2648.0, significance=Significance.MAJOR)],
+            support_zones=[HTFZone("SUP_1", high=2630.0, low=2628.0, significance=Significance.MAJOR)],
+            setups_enabled={"TST": True, "BPB": False},
+            execution_rules={}, risk_management={}, news_filter={}
+        )
+
+        # Case 1: Wick sweep only (high=2651.0, close=2649.0 <= res.high) -> No flip
+        wick_bar = Bar(100, 2647.0, 2651.0, 2646.0, 2649.0)
+        res = ZoneMonitor.evaluate_zone_breaches(wick_bar, config)
+        self.assertFalse(res["has_flipped"])
+
+        # Case 2: Confirmed breakout (close=2652.0 > res.high + buffer) -> Flip RES to SUP!
+        breakout_bar = Bar(200, 2648.0, 2653.0, 2647.0, 2652.0)
+        res = ZoneMonitor.evaluate_zone_breaches(breakout_bar, config)
+        self.assertTrue(res["has_flipped"])
+        # Check Resistance converted to Support
+        self.assertEqual(len(config.resistance_zones), 0)
+        self.assertTrue(any(z.id == "FLIP_RES_1" for z in config.support_zones))
+        self.assertEqual(config.market_regime, MarketRegime.BREAKOUT_EXPANSION)
+        self.assertFalse(config.setups_enabled["TST"])
+        self.assertTrue(config.setups_enabled["BPB"])
+
+    def test_zone_monitor_target_and_replan_trigger(self):
+        """Tests dynamic HTF target lookup and Tier 2 AI re-plan trigger detection."""
+        from core.domain.models import HTFZone, Significance, SessionConfig, MarketRegime
+        from core.domain.rules.zone_monitor import ZoneMonitor
+
+        config = SessionConfig(
+            session_id="s1", symbol="XAUUSD", generated_at="2026-09-10",
+            market_regime=MarketRegime.SIDEWAYS_RANGE,
+            resistance_zones=[HTFZone("RES_1", high=2650.0, low=2648.0, significance=Significance.MAJOR)],
+            support_zones=[HTFZone("SUP_1", high=2630.0, low=2628.0, significance=Significance.MAJOR)],
+            setups_enabled={}, execution_rules={}, risk_management={}, news_filter={}
+        )
+
+        # 1. Test AI re-plan trigger on confirmed M30 boundary close
+        # M30 bar closing at 2652.5 > max resistance 2650.0 + buffer
+        m30_bar = Bar(1800, 2649.0, 2653.0, 2648.0, 2652.5)
+        should_replan, reason = ZoneMonitor.should_trigger_ai_replan(m30_bar, config)
+        self.assertTrue(should_replan)
+        self.assertIn("broke above max session resistance", reason)
+
+        # 2. Test dynamic HTF target finder when zones are cleared
+        m30_bars = [
+            Bar(100, 2650.0, 2655.0, 2649.0, 2654.0),
+            Bar(200, 2654.0, 2660.0, 2653.0, 2658.0),
+            Bar(300, 2658.0, 2675.0, 2657.0, 2672.0), # Swing High
+            Bar(400, 2670.0, 2668.0, 2662.0, 2664.0),
+            Bar(500, 2664.0, 2666.0, 2661.0, 2663.0)
+        ]
+        target = ZoneMonitor.find_next_htf_target(m30_bars, OrderSide.BUY, current_price=2655.0)
+        self.assertGreater(target, 2655.0)
+
 if __name__ == "__main__":
     unittest.main()
 

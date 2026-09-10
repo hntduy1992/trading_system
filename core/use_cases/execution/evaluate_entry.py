@@ -28,12 +28,15 @@ class EvaluateEntryUseCase:
         }
         self.consumed_anchors: set = set()
         self.last_trade_closed_time: float = 0.0
+        self.last_closed_state: Optional[PositionState] = None
+        self.zone_scratch_history: Dict[str, List[float]] = {}
         self.consecutive_losses: int = 0
         self.total_session_trades: int = 0
 
     def record_trade_closed(self, trade: TradeLifecycle, is_loss: Optional[bool] = None):
-        """Records closed trade outcome to adjust circuit breaker and cooldown timers."""
+        """Records closed trade outcome to adjust circuit breaker, dynamic cooldown, and zone scratch tracking."""
         self.last_trade_closed_time = trade.close_time or time.time()
+        self.last_closed_state = trade.state
         if is_loss is None:
             is_loss = (trade.state == PositionState.STOPPED_OUT)
         
@@ -42,10 +45,19 @@ class EvaluateEntryUseCase:
         elif trade.state == PositionState.FULLY_CLOSED:
             self.consecutive_losses = 0
 
+        # Track scratches per spatial price zone to prevent consolidation churn
+        if trade.state == PositionState.SCRATCHED and trade.spatial_anchor_key:
+            now = self.last_trade_closed_time
+            if trade.spatial_anchor_key not in self.zone_scratch_history:
+                self.zone_scratch_history[trade.spatial_anchor_key] = []
+            self.zone_scratch_history[trade.spatial_anchor_key].append(now)
+
     def reset_session(self):
         """Resets session tracking statistics."""
         self.consumed_anchors.clear()
+        self.zone_scratch_history.clear()
         self.last_trade_closed_time = 0.0
+        self.last_closed_state = None
         self.consecutive_losses = 0
         self.total_session_trades = 0
 
@@ -94,8 +106,15 @@ class EvaluateEntryUseCase:
                 })
                 return None
 
-        # 3. Capital Protection Constraint: Post-Trade Cooldown
-        cooldown_secs = exec_rules.get("post_trade_cooldown_seconds", 180)
+        # 3. Capital Protection Constraint: Post-Trade Cooldown (Differentiated by outcome)
+        base_cooldown = exec_rules.get("post_trade_cooldown_seconds", 180)
+        if self.last_closed_state == PositionState.SCRATCHED:
+            cooldown_secs = exec_rules.get("scratch_cooldown_seconds", max(base_cooldown, 300))
+        elif self.last_closed_state == PositionState.STOPPED_OUT:
+            cooldown_secs = exec_rules.get("stopout_cooldown_seconds", max(base_cooldown, 420))
+        else:
+            cooldown_secs = base_cooldown
+
         now = time.time()
         if self.last_trade_closed_time > 0 and (now - self.last_trade_closed_time) < cooldown_secs:
             return None
@@ -149,6 +168,18 @@ class EvaluateEntryUseCase:
             )
 
             if triggered and side and pullback_price and t1 and t2:
+                # Spatial Anchor Deduplication & Max Retries per Zone Check
+                spatial_anchor_key = f"{setup_name}_{side.value}_{round(pullback_price, 1)}"
+                max_retries = exec_rules.get("max_retries_per_zone", 2)
+                retry_window = exec_rules.get("zone_retry_window_seconds", 1800)
+                recent_scratches = [
+                    t for t in self.zone_scratch_history.get(spatial_anchor_key, [])
+                    if now - t < retry_window
+                ]
+                if len(recent_scratches) >= max_retries:
+                    # Zone locked out due to repeat scratches in consolidation!
+                    continue
+
                 # 8. Single Entry Anchor: 1 Swing structure = 1 Trade only
                 latest_swing_time = int(swings_3m[-1].time) if swings_3m else 0
                 anchor_id = f"{setup_name}_{side.value}_{round(pullback_price, 2)}_{latest_swing_time}"
@@ -271,7 +302,8 @@ class EvaluateEntryUseCase:
                     stop_order_ticket=None,
                     m1_bars_in_trade=0,
                     last_bar_timestamp=bars_m1[-1].timestamp if bars_m1 else None,
-                    anchor_id=anchor_id
+                    anchor_id=anchor_id,
+                    spatial_anchor_key=spatial_anchor_key
                 )
 
                 await self.event_bus.publish("trade_opened", {
