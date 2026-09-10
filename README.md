@@ -67,19 +67,60 @@ d:\Project\trading_system\
 
 ---
 
-## 3. Hướng dẫn Khởi chạy (Chỉ 1 Lệnh Duy Nhất)
+---
 
-### Chế độ Mô phỏng / Paper Trading (Khuyên dùng để test ngay):
-```powershell
-python run.py --mode paper --symbol EURUSD
-```
-* Hệ thống sẽ tự động khởi tạo dữ liệu giả lập, kết nối In-memory EventBus, sinh kế hoạch trước phiên và mở Web Dashboard.
+## 3. Cấu hình Môi trường & Khởi chạy (Deploy)
 
-### Chế độ Giao dịch Thật với MetaTrader 5:
+Hệ thống hỗ trợ tách biệt file môi trường cho từng chế độ nhằm **bảo mật tuyệt đối, chống rò rỉ API Keys lên Git**:
+- `.env.paper`: Cấu hình cho chế độ chạy mô phỏng / backtest (không cần MT5).
+- `.env.live`: Cấu hình cho chế độ chạy tài khoản MT5 thật.
+- `.env.example`, `.env.paper.example`, `.env.live.example`: Mẫu tham khảo (commit lên Git an toàn).
+
+### Bước 1: Thiết lập cấu hình nhanh (Setup Wizard)
+Trước khi chạy lần đầu, bạn có thể chạy kịch bản wizard để nhập API Keys và tự động kiểm tra kết nối:
 ```powershell
-python run.py --mode live --symbol EURUSD
+python setup_env.py
 ```
-*(Yêu cầu đã cài đặt và đăng nhập phần mềm MT5 trên máy).*
+Hoặc copy từ file mẫu:
+```powershell
+cp .env.paper.example .env.paper
+cp .env.live.example .env.live
+```
+
+### Bước 2: Khởi chạy hệ thống
+
+#### Cách 1: Khởi chạy nhanh bằng file `.bat` (Tự động kiểm tra & giải phóng Port):
+Bạn chỉ cần nhấp đúp vào file `start.bat` hoặc gõ trên terminal:
+```cmd
+start.bat
+```
+Script sẽ tự động:
+1. Quét kiểm tra xem cổng 29120 hoặc 29121 có đang bị tiến trình nào chiếm dụng không. Nếu có, tự động đóng tiến trình đó để giải phóng cổng.
+2. Hiển thị menu cho bạn chọn chế độ chạy: Paper Trading, Live MT5, Setup Wizard hoặc Test.
+
+Bạn cũng có thể chạy trực tiếp với tham số:
+```cmd
+start.bat paper     # Tự động giải phóng port và chạy Paper Trading
+start.bat live      # Tự động giải phóng port và chạy Live MT5
+```
+
+#### Cách 2: Khởi chạy trực tiếp bằng Python:
+
+##### Chế độ Mô phỏng / Paper Trading:
+```powershell
+python run.py --env paper
+```
+
+#### Chế độ Giao dịch Thật với MetaTrader 5:
+```powershell
+python run.py --env live --symbol XAUUSD
+```
+
+#### Truyền trực tiếp API Key qua dòng lệnh (CLI):
+```powershell
+python run.py --env paper --gemini-api-key "AIzaSy..."
+```
+*(Bạn cũng có thể nhập hoặc thay đổi API Key bất cứ lúc nào trực tiếp trên Web Dashboard tại Tab Server B).*
 
 ---
 

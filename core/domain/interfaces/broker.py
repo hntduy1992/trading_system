@@ -60,3 +60,8 @@ class IBrokerGateway(ABC):
     async def modify_position(self, ticket: int, sl: float, tp: float) -> bool:
         """Modify SL and TP of an active position (TRADE_ACTION_SLTP)."""
         pass
+
+    @abstractmethod
+    async def get_terminal_status(self) -> Dict[str, Any]:
+        """Check broker connection, terminal AlgoTrading status, and account permissions."""
+        pass

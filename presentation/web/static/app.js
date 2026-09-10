@@ -5,6 +5,10 @@ let wsClient;
 let entryLine, slLine, tp1Line, tp2Line, lrpLine;
 let htfLines = [];
 
+let currentRadar = null;
+let activeTradesData = [];
+let currentManualSide = "BUY";
+
 const SERVER_A_URL = "http://127.0.0.1:29120";
 const SERVER_B_URL = "http://127.0.0.1:29121";
 
@@ -244,6 +248,7 @@ function updateChartPriceLines(radar) {
 
 function updateRadarUI(radar) {
   if (!radar) return;
+  currentRadar = radar;
   const badge = document.getElementById("radar-status-badge");
   if (badge) {
     badge.textContent = radar.status || "SCANNING";
@@ -389,6 +394,42 @@ async function fetchStatus() {
       document.getElementById("stat-regime").textContent = data.regime;
       document.getElementById("stat-mode").textContent = data.is_paused ? "PAUSED" : "ACTIVE";
       document.getElementById("stat-mode").style.color = data.is_paused ? "#d29922" : "#238636";
+
+      // Kiểm tra và cập nhật trạng thái AutoTrading
+      const badge = document.getElementById("stat-autotrading-badge");
+      const banner = document.getElementById("autotrading-warning-banner");
+      const bannerTitle = document.getElementById("autotrading-warning-title");
+      const bannerDesc = document.getElementById("autotrading-warning-desc");
+
+      if (badge && data.autotrading) {
+        const at = data.autotrading;
+        if (at.auto_trading_ready) {
+          badge.textContent = "ALGO ON (READY)";
+          badge.style.background = "#0f2d1e";
+          badge.style.color = "#3fb950";
+          badge.style.borderColor = "#238636";
+          if (banner) banner.style.display = "none";
+        } else {
+          badge.textContent = "ALGO OFF (BLOCKED)";
+          badge.style.background = "#3b1219";
+          badge.style.color = "#f85149";
+          badge.style.borderColor = "#da3633";
+
+          if (banner) {
+            banner.style.display = "flex";
+            if (!at.connected) {
+              if (bannerTitle) bannerTitle.textContent = "MT5 CHƯA KẾT NỐI";
+              if (bannerDesc) bannerDesc.textContent = "Chưa kết nối được với phần mềm MetaTrader 5 terminal. Vui lòng mở MT5 trên máy.";
+            } else if (!at.trade_allowed) {
+              if (bannerTitle) bannerTitle.textContent = "NÚT 'ALGO TRADING' ĐANG BỊ TẮT TRÊN MT5!";
+              if (bannerDesc) bannerDesc.textContent = "Vui lòng bấm vào nút 'Algo Trading' trên thanh công cụ phần mềm MT5 (chuyển sang màu Xanh lá) để bot có thể tự động vào lệnh.";
+            } else {
+              if (bannerTitle) bannerTitle.textContent = "TÀI KHOẢN CHƯA BẬT GIAO DỊCH TỰ ĐỘNG!";
+              if (bannerDesc) bannerDesc.textContent = at.message || "Vào Tools -> Options -> Expert Advisors và bật 'Allow Algo Trading'.";
+            }
+          }
+        }
+      }
     }
   } catch (e) {}
 }
@@ -410,6 +451,7 @@ async function fetchPositions() {
     const res = await fetch(`${SERVER_A_URL}/api/trades`);
     if (res.ok) {
       const trades = await res.json();
+      activeTradesData = trades;
       const tbody = document.getElementById("positions-tbody");
       document.getElementById("position-count").textContent = `${trades.length} Open`;
 
@@ -418,7 +460,9 @@ async function fetchPositions() {
         return;
       }
 
-      tbody.innerHTML = trades.map(t => `
+      tbody.innerHTML = trades.map(t => {
+        const ticket = t.part1.ticket || t.limit_order_ticket || 0;
+        return `
         <tr>
           <td><code>${t.trade_id}</code></td>
           <td><strong>${t.setup}</strong></td>
@@ -429,10 +473,14 @@ async function fetchPositions() {
           <td style="color:#da3633;">${t.part1.sl_price.toFixed(2)}</td>
           <td style="color:#238636;">${t.part1.tp_price.toFixed(2)}</td>
           <td>
-            <button class="btn btn-warning" style="padding:2px 6px; font-size:10px;" onclick="forceScratch(${t.part1.ticket})">Scratch</button>
+            <div style="display:flex; gap:4px;">
+              <button class="btn btn-primary" style="padding:2px 6px; font-size:10px;" onclick="openModifyModal(${ticket}, ${t.part1.sl_price}, ${t.part1.tp_price}, '${t.trade_id}')">Sửa SL/TP</button>
+              <button class="btn btn-warning" style="padding:2px 6px; font-size:10px;" onclick="forceScratch(${t.part1.ticket})">Scratch</button>
+            </div>
           </td>
         </tr>
-      `).join("");
+      `;
+      }).join("");
     }
   } catch (e) {}
 }
@@ -735,6 +783,298 @@ async function fetchOnlineModels() {
   }
 }
 
+// ==========================================
+// RISK CONFIGURATION (VOLUME / SL / TP OVERRIDES)
+// ==========================================
+
+async function loadRiskConfig() {
+  try {
+    const res = await fetch(`${SERVER_A_URL}/api/risk_config`);
+    if (res.ok) {
+      const data = await res.json();
+      const badge = document.getElementById("risk-mode-badge");
+      const volInput = document.getElementById("cfg-volume-input");
+      const riskPctInput = document.getElementById("cfg-risk-pct-input");
+      const slInput = document.getElementById("cfg-sl-input");
+      const tpInput = document.getElementById("cfg-tp-input");
+
+      if (volInput && data.fixed_lot_size) volInput.value = data.fixed_lot_size;
+      if (riskPctInput && data.account_risk_limit_percent) riskPctInput.value = data.account_risk_limit_percent;
+      if (slInput && data.manual_sl) slInput.value = data.manual_sl;
+      if (tpInput && data.manual_tp1) tpInput.value = data.manual_tp1;
+
+      if (badge) {
+        if (data.fixed_lot_size || data.manual_sl || data.manual_tp1) {
+          badge.textContent = "CUSTOM (MANUAL OVERRIDE)";
+          badge.style.color = "#e3b341";
+          badge.style.borderColor = "#e3b341";
+        } else {
+          badge.textContent = "AUTO (SUGGESTED)";
+          badge.style.color = "#3fb950";
+          badge.style.borderColor = "#3fb950";
+        }
+      }
+    }
+  } catch (e) {
+    console.error("loadRiskConfig error:", e);
+  }
+}
+
+function applySuggestedLot() {
+  const lot = currentRadar && currentRadar.lot_total ? currentRadar.lot_total : 0.17;
+  const input = document.getElementById("cfg-volume-input");
+  if (input) input.value = lot;
+}
+
+function applySuggestedSL() {
+  const sl = currentRadar && currentRadar.s1 ? currentRadar.s1 : "";
+  const input = document.getElementById("cfg-sl-input");
+  if (input && sl) input.value = sl;
+}
+
+function applySuggestedTP() {
+  const tp = currentRadar && currentRadar.t1 ? currentRadar.t1 : "";
+  const input = document.getElementById("cfg-tp-input");
+  if (input && tp) input.value = tp;
+}
+
+async function saveRiskConfig() {
+  try {
+    const vol = parseFloat(document.getElementById("cfg-volume-input").value) || null;
+    const riskPct = parseFloat(document.getElementById("cfg-risk-pct-input").value) || null;
+    const sl = parseFloat(document.getElementById("cfg-sl-input").value) || null;
+    const tp = parseFloat(document.getElementById("cfg-tp-input").value) || null;
+
+    const payload = {
+      fixed_lot_size: vol,
+      account_risk_limit_percent: riskPct,
+      manual_sl: sl,
+      manual_tp1: tp
+    };
+
+    const res = await fetch(`${SERVER_A_URL}/api/risk_config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      alert("✅ Đã lưu cấu hình Khối lượng & SL/TP thành công!");
+      loadRiskConfig();
+    } else {
+      alert("❌ Lỗi khi lưu cấu hình rủi ro.");
+    }
+  } catch (e) {
+    alert(`Lỗi: ${e.message}`);
+  }
+}
+
+async function resetRiskConfigToAuto() {
+  try {
+    const payload = {
+      fixed_lot_size: 0,
+      account_risk_limit_percent: 1.0,
+      manual_sl: 0,
+      manual_tp1: 0,
+      manual_tp2: 0
+    };
+
+    const res = await fetch(`${SERVER_A_URL}/api/risk_config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      document.getElementById("cfg-volume-input").value = "";
+      document.getElementById("cfg-risk-pct-input").value = "1.0";
+      document.getElementById("cfg-sl-input").value = "";
+      document.getElementById("cfg-tp-input").value = "";
+      loadRiskConfig();
+      alert("🔄 Đã đặt lại cấu hình Khối lượng và SL/TP về chế độ Gợi ý Tự động!");
+    }
+  } catch (e) {
+    alert(`Lỗi: ${e.message}`);
+  }
+}
+
+// ==========================================
+// MANUAL ORDER MODAL (BUY / SELL)
+// ==========================================
+
+function openOrderModal(side) {
+  currentManualSide = side;
+  const modal = document.getElementById("modal-order");
+  const header = document.getElementById("modal-order-header");
+  const submitBtn = document.getElementById("modal-order-submit");
+
+  if (header) {
+    header.textContent = side === "BUY" ? "🟢 MỞ LỆNH MUA (BUY) - MT5" : "🔴 MỞ LỆNH BÁN (SELL) - MT5";
+    header.style.color = side === "BUY" ? "#3fb950" : "#f85149";
+  }
+
+  if (submitBtn) {
+    submitBtn.className = side === "BUY" ? "btn btn-success" : "btn btn-danger";
+    submitBtn.textContent = side === "BUY" ? "🚀 Xác Nhận Mua (BUY)" : "🚀 Xác Nhận Bán (SELL)";
+  }
+
+  // Tự động điền giá trị gợi ý
+  fillSuggestedOrderLot();
+  fillSuggestedOrderSL();
+  fillSuggestedOrderTP();
+
+  if (modal) modal.style.display = "flex";
+}
+
+function closeOrderModal() {
+  const modal = document.getElementById("modal-order");
+  if (modal) modal.style.display = "none";
+}
+
+function onOrderTypeChange() {
+  const type = document.getElementById("modal-order-type").value;
+  const grpPrice = document.getElementById("grp-order-price");
+  if (grpPrice) {
+    grpPrice.style.display = (type === "LIMIT" || type === "STOP") ? "block" : "none";
+  }
+  if (type === "LIMIT" || type === "STOP") {
+    fillSuggestedOrderPrice();
+  }
+}
+
+function fillSuggestedOrderLot() {
+  const lot = currentRadar && currentRadar.lot_total ? currentRadar.lot_total : 0.01;
+  const input = document.getElementById("modal-order-volume");
+  if (input) input.value = lot;
+}
+
+function fillSuggestedOrderPrice() {
+  const price = currentRadar && currentRadar.entry ? currentRadar.entry : "";
+  const input = document.getElementById("modal-order-price");
+  if (input && price) input.value = price;
+}
+
+function fillSuggestedOrderSL() {
+  const sl = currentRadar && currentRadar.s1 ? currentRadar.s1 : "";
+  const input = document.getElementById("modal-order-sl");
+  if (input && sl) input.value = sl;
+}
+
+function fillSuggestedOrderTP() {
+  const tp = currentRadar && currentRadar.t1 ? currentRadar.t1 : "";
+  const input = document.getElementById("modal-order-tp");
+  if (input && tp) input.value = tp;
+}
+
+async function submitManualOrder() {
+  try {
+    const orderType = document.getElementById("modal-order-type").value;
+    const vol = parseFloat(document.getElementById("modal-order-volume").value);
+    const priceVal = parseFloat(document.getElementById("modal-order-price").value) || null;
+    const slVal = parseFloat(document.getElementById("modal-order-sl").value) || null;
+    const tpVal = parseFloat(document.getElementById("modal-order-tp").value) || null;
+
+    if (!vol || vol <= 0) {
+      alert("Vui lòng nhập khối lượng Lot hợp lệ (> 0)!");
+      return;
+    }
+
+    const payload = {
+      side: currentManualSide,
+      order_type: orderType,
+      volume: vol,
+      price: priceVal,
+      sl: slVal,
+      tp: tpVal,
+      comment: `MANUAL_${currentManualSide}`
+    };
+
+    const res = await fetch(`${SERVER_A_URL}/api/trade/place`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      closeOrderModal();
+      alert(`✅ Đặt lệnh ${currentManualSide} thành công! Ticket MT5: #${data.ticket}`);
+      fetchPositions();
+    } else {
+      const err = await res.json();
+      alert(`❌ Lỗi đặt lệnh: ${err.detail || "Không rõ nguyên nhân"}`);
+    }
+  } catch (e) {
+    alert(`Lỗi kết nối đặt lệnh: ${e.message}`);
+  }
+}
+
+// ==========================================
+// MODIFY POSITION MODAL (SL / TP)
+// ==========================================
+
+function openModifyModal(ticket, currentSL, currentTP, tradeId) {
+  const modal = document.getElementById("modal-modify");
+  document.getElementById("mod-ticket-label").textContent = `${ticket} (${tradeId})`;
+  document.getElementById("mod-ticket-input").value = ticket;
+  document.getElementById("mod-sl-input").value = currentSL ? currentSL.toFixed(2) : "";
+  document.getElementById("mod-tp-input").value = currentTP ? currentTP.toFixed(2) : "";
+  if (modal) modal.style.display = "flex";
+}
+
+function closeModifyModal() {
+  const modal = document.getElementById("modal-modify");
+  if (modal) modal.style.display = "none";
+}
+
+function fillModBreakeven() {
+  const ticket = parseInt(document.getElementById("mod-ticket-input").value);
+  const trade = activeTradesData.find(t => t.part1.ticket === ticket || t.part2.ticket === ticket || t.limit_order_ticket === ticket);
+  if (trade && trade.part1) {
+    const entry = trade.part1.entry_price;
+    const beBuffer = 0.30;
+    const beSL = trade.side === "BUY" ? (entry + beBuffer) : (entry - beBuffer);
+    document.getElementById("mod-sl-input").value = beSL.toFixed(2);
+  }
+}
+
+function fillModSuggestedTP() {
+  if (currentRadar && currentRadar.t1) {
+    document.getElementById("mod-tp-input").value = currentRadar.t1.toFixed(2);
+  }
+}
+
+async function submitModifyPosition() {
+  try {
+    const ticket = parseInt(document.getElementById("mod-ticket-input").value);
+    const sl = parseFloat(document.getElementById("mod-sl-input").value);
+    const tp = parseFloat(document.getElementById("mod-tp-input").value);
+
+    if (isNaN(sl) || isNaN(tp)) {
+      alert("Vui lòng nhập đầy đủ giá trị SL và TP!");
+      return;
+    }
+
+    const payload = { ticket_id: ticket, sl: sl, tp: tp };
+    const res = await fetch(`${SERVER_A_URL}/api/trade/modify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      closeModifyModal();
+      alert(`✅ Đã cập nhật SL/TP cho Ticket #${ticket} thành công trên MT5!`);
+      fetchPositions();
+    } else {
+      const err = await res.json();
+      alert(`❌ Lỗi cập nhật SL/TP: ${err.detail || "Không thể sửa lệnh"}`);
+    }
+  } catch (e) {
+    alert(`Lỗi kết nối khi sửa vị thế: ${e.message}`);
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   initCharts();
   loadInitialBars();
@@ -743,6 +1083,7 @@ window.addEventListener("DOMContentLoaded", () => {
   fetchPositions();
   fetchRadarFallback();
   loadAIConfig();
+  loadRiskConfig();
   setInterval(() => {
     fetchStatus();
     fetchPositions();
