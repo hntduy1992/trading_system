@@ -14,7 +14,12 @@ class PreSessionPlannerUseCase:
         self.vector_store = vector_store
         self.broker = broker
 
-    async def execute(self, symbol: str, economic_events: List[Dict[str, Any]]) -> SessionConfig:
+    async def execute(
+        self,
+        symbol: str,
+        economic_events: List[Dict[str, Any]],
+        session_tag: Optional[str] = None
+    ) -> SessionConfig:
         """
         Gathers baseline metrics, rates, RAG lessons, calls AI to generate trading_config.json
         """
@@ -47,5 +52,9 @@ class PreSessionPlannerUseCase:
             economic_events=economic_events,
             retrieved_rag_lessons=rag_lessons
         )
+
+        from core.domain.rules.session_manager import SessionManager
+        status = SessionManager().get_session_status()
+        config.session_tag = session_tag or status.session_tag
 
         return config

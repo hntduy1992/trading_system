@@ -75,13 +75,32 @@ class EvaluateEntryUseCase:
         risk_mgmt = config.risk_management or {}
         exec_rules = config.execution_rules or {}
 
-        # 2. Capital Protection Constraint: Post-Trade Cooldown
+        # 2. Session Transition & Strict Plan Verification Check
+        if exec_rules.get("enable_session_transition_guard", True):
+            from core.domain.rules.session_manager import SessionManager
+            sm = getattr(self, "session_manager", None)
+            if not sm:
+                sm = SessionManager()
+                self.session_manager = sm
+
+            session_status = sm.get_session_status(config)
+            if session_status.in_transition:
+                return None
+            if not session_status.is_plan_loaded:
+                await self.event_bus.publish("telemetry", {
+                    "type": "WAITING_FOR_SESSION_PLAN",
+                    "session_tag": session_status.session_tag,
+                    "reason": f"Plan for active session {session_status.current_session.value} not yet verified/loaded."
+                })
+                return None
+
+        # 3. Capital Protection Constraint: Post-Trade Cooldown
         cooldown_secs = exec_rules.get("post_trade_cooldown_seconds", 180)
         now = time.time()
         if self.last_trade_closed_time > 0 and (now - self.last_trade_closed_time) < cooldown_secs:
             return None
 
-        # 3. Capital Protection Constraint: Max Consecutive Losses Circuit Breaker
+        # 4. Capital Protection Constraint: Max Consecutive Losses Circuit Breaker
         max_consecutive_losses = risk_mgmt.get("max_consecutive_losses", 2)
         if self.consecutive_losses >= max_consecutive_losses:
             await self.event_bus.publish("telemetry", {

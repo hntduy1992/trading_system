@@ -339,17 +339,23 @@ def create_server_a_app(
                 risk_management=cfg_data.get("risk_management", {}),
                 news_filter=cfg_data.get("news_filter", {})
             )
+            from core.domain.rules.session_manager import SessionManager
+            cur_tag = SessionManager().get_session_status().session_tag
+            new_plan.session_tag = cfg_data.get("session_tag") or cur_tag
+
             state_ref["session_config_obj"] = new_plan
             state_ref["session_config"] = {
                 "session_id": new_plan.session_id,
                 "symbol": new_plan.symbol,
                 "market_regime": new_plan.market_regime.value,
-                "setups_enabled": new_plan.setups_enabled
+                "setups_enabled": new_plan.setups_enabled,
+                "session_tag": new_plan.session_tag
             }
             await event_bus.publish("plan_deployed", {
                 "session_id": new_plan.session_id,
                 "market_regime": new_plan.market_regime.value,
-                "setups_enabled": new_plan.setups_enabled
+                "setups_enabled": new_plan.setups_enabled,
+                "session_tag": new_plan.session_tag
             })
             print(f"[SERVER A] Deployed new AI Session Plan: {new_plan.session_id} (Regime={new_plan.market_regime.value})")
             return {"status": "SUCCESS", "message": f"Plan {new_plan.session_id} deployed to Server A successfully!"}
