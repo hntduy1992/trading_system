@@ -2,7 +2,7 @@
 Pre-Session Planning Use Case (Server B AI Strategy Engine)
 Section 3.1 of YTC Specification
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from core.domain.models import SessionConfig
 from core.domain.interfaces.ai_engine import IAIEngine
 from core.domain.interfaces.vector_store import IVectorStore
