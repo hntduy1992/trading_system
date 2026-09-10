@@ -91,7 +91,10 @@ class SystemOrchestrator:
             self.ai_engine = MockAIEngine()
 
         # 2. Dependency Injection: Use Cases
+        from core.domain.rules.session_manager import SessionManager
+        self.session_manager = SessionManager(enabled=True)
         self.evaluate_entry = EvaluateEntryUseCase(self.broker, self.event_bus)
+        self.evaluate_entry.session_manager = self.session_manager
         self.manage_lifecycle = ManageLifecycleUseCase(self.broker, self.event_bus)
         self.circuit_breaker = CircuitBreakerUseCase(self.broker, self.event_bus)
         self.pre_planner = PreSessionPlannerUseCase(self.ai_engine, self.vector_store, self.broker)
@@ -126,6 +129,35 @@ class SystemOrchestrator:
                     continue
 
                 session_cfg: SessionConfig = self.state.get("session_config_obj")
+
+                # Check Session Transition & Auto Re-Plan on Session Stabilization
+                session_status = self.session_manager.get_session_status(session_cfg)
+                if self.session_manager.should_trigger_auto_replan(session_status, session_cfg):
+                    print(f"[SESSION_MANAGER] New session {session_status.current_session.value} stabilized! Auto-generating fresh AI Session Plan ({session_status.session_tag})...")
+                    self.session_manager.mark_replan_started()
+                    try:
+                        new_plan = await self.pre_planner.execute(self.symbol, [], session_tag=session_status.session_tag)
+                        self.state["session_config_obj"] = new_plan
+                        self.state["session_config"] = {
+                            "session_id": new_plan.session_id,
+                            "symbol": new_plan.symbol,
+                            "market_regime": new_plan.market_regime.value,
+                            "setups_enabled": new_plan.setups_enabled,
+                            "session_tag": new_plan.session_tag
+                        }
+                        session_cfg = new_plan
+                        self.session_manager.mark_replan_completed(session_status.session_tag)
+                        await self.event_bus.publish("telemetry", {
+                            "type": "SESSION_PLAN_RELOADED",
+                            "session_tag": session_status.session_tag,
+                            "session": session_status.current_session.value,
+                            "regime": new_plan.market_regime.value
+                        })
+                        print(f"[SESSION_MANAGER] New plan {session_status.session_tag} active! Trading resumed for {session_status.current_session.value}.")
+                    except Exception as replan_err:
+                        print(f"[SESSION_MANAGER ERROR] Auto Re-Plan failed: {replan_err}")
+                        self.session_manager.is_replanning = False
+
                 if not session_cfg:
                     # Waiting for pre-session plan deployment
                     await asyncio.sleep(1.0)
@@ -243,19 +275,27 @@ class SystemOrchestrator:
                     else:
                         cand_side, cand_setup, expected_entry, s1, t1, t2, lrp, dist = "NONE", "SCANNING", curr_p, curr_p, curr_p, curr_p, curr_p, 0
 
+                    session_status = self.session_manager.get_session_status(session_cfg)
                     radar_status = "SCANNING_APPROACH"
-                    max_losses = session_cfg.risk_management.get("max_consecutive_losses", 2) if session_cfg and session_cfg.risk_management else 2
-                    if self.evaluate_entry.consecutive_losses >= max_losses:
-                        radar_status = "CIRCUIT_BREAKER_PAUSED"
+                    if session_status.in_transition:
+                        rem_m = int(session_status.seconds_until_stabilized // 60)
+                        rem_s = int(session_status.seconds_until_stabilized % 60)
+                        radar_status = f"GIAO_PHIÊN ({session_status.transition_name} - {rem_m:02d}m{rem_s:02d}s)"
+                    elif not session_status.is_plan_loaded:
+                        radar_status = f"CHỜ_PLAN ({session_status.current_session.value})"
                     else:
-                        cooldown_secs = session_cfg.execution_rules.get("post_trade_cooldown_seconds", 180) if session_cfg and session_cfg.execution_rules else 180
-                        now = time.time()
-                        time_since_close = now - self.evaluate_entry.last_trade_closed_time
-                        if self.evaluate_entry.last_trade_closed_time > 0 and time_since_close < cooldown_secs:
-                            rem = int(cooldown_secs - time_since_close)
-                            radar_status = f"COOLDOWN ({rem}s)"
-                        elif abs(dist) <= profile.sr_proximity_points:
-                            radar_status = "READY_TO_FIRE"
+                        max_losses = session_cfg.risk_management.get("max_consecutive_losses", 2) if session_cfg and session_cfg.risk_management else 2
+                        if self.evaluate_entry.consecutive_losses >= max_losses:
+                            radar_status = "CIRCUIT_BREAKER_PAUSED"
+                        else:
+                            cooldown_secs = session_cfg.execution_rules.get("post_trade_cooldown_seconds", 180) if session_cfg and session_cfg.execution_rules else 180
+                            now = time.time()
+                            time_since_close = now - self.evaluate_entry.last_trade_closed_time
+                            if self.evaluate_entry.last_trade_closed_time > 0 and time_since_close < cooldown_secs:
+                                rem = int(cooldown_secs - time_since_close)
+                                radar_status = f"COOLDOWN ({rem}s)"
+                            elif abs(dist) <= profile.sr_proximity_points:
+                                radar_status = "READY_TO_FIRE"
 
                     radar = {
                         "status": radar_status,
@@ -312,15 +352,18 @@ class SystemOrchestrator:
         # Generate initial pre-session plan if auto_plan enabled
         if auto_plan:
             print("[PLANNER] Generating initial pre-session plan...")
-            plan = await self.pre_planner.execute(self.symbol, [])
+            status = self.session_manager.get_session_status()
+            plan = await self.pre_planner.execute(self.symbol, [], session_tag=status.session_tag)
+            self.session_manager.mark_replan_completed(status.session_tag)
             self.state["session_config_obj"] = plan
             self.state["session_config"] = {
                 "session_id": plan.session_id,
                 "symbol": plan.symbol,
                 "market_regime": plan.market_regime.value,
-                "setups_enabled": plan.setups_enabled
+                "setups_enabled": plan.setups_enabled,
+                "session_tag": plan.session_tag
             }
-            print(f"[PLANNER] Plan active: Regime = {plan.market_regime.value}")
+            print(f"[PLANNER] Initial Plan active: Session {status.current_session.value} ({status.session_tag}), Regime = {plan.market_regime.value}")
 
         print("\n" + "=" * 70)
         print("  YTC PRICE ACTION TRADING SYSTEM ACTIVATED")

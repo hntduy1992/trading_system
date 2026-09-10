@@ -241,7 +241,7 @@ class TestYTCSystem(unittest.TestCase):
             resistance_zones=[HTFZone("R1", 2670.0, 2665.0)],
             support_zones=[HTFZone("S1", 2645.0, 2640.0)],
             setups_enabled={"TST": True, "BOF": False, "BPB": False, "PB": False, "CPB": False},
-            execution_rules={"post_trade_cooldown_seconds": 180},
+            execution_rules={"post_trade_cooldown_seconds": 180, "enable_session_transition_guard": False},
             risk_management={"fixed_lot_size": 0.1, "max_consecutive_losses": 2, "max_session_trades": 6},
             news_filter={}
         )
@@ -330,6 +330,100 @@ class TestYTCSystem(unittest.TestCase):
         # Should be blocked by circuit breaker
         blocked_trade = asyncio.run(entry_uc.execute(config, [], bars_m3, bars_m1, []))
         self.assertIsNone(blocked_trade)
+
+    def test_session_transition_detection_and_freeze(self):
+        """Tests that during session transition (e.g. Asia->London), freeze window is identified."""
+        from datetime import datetime, timezone
+        from core.domain.rules.session_manager import SessionManager
+
+        sm = SessionManager()
+        # 07:00 UTC (14:00 VN) -> inside ASIA_TO_LONDON transition (06:45 - 07:30 UTC)
+        fake_time = datetime(2026, 9, 10, 7, 0, 0, tzinfo=timezone.utc)
+        status = sm.get_session_status(now_utc=fake_time)
+        self.assertTrue(status.in_transition)
+        self.assertEqual(status.transition_name, "ASIA_TO_LONDON")
+        self.assertGreater(status.seconds_until_stabilized, 0)
+        self.assertIn("GIAO PHIÊN", status.message)
+
+    def test_strict_session_plan_verification(self):
+        """Tests that trading is strictly blocked if the plan loaded does not match the active session."""
+        from datetime import datetime, timezone
+        from core.domain.rules.session_manager import SessionManager
+        from core.domain.models import SessionConfig, MarketRegime
+
+        sm = SessionManager()
+        fake_london_time = datetime(2026, 9, 10, 8, 0, 0, tzinfo=timezone.utc) # 15:00 VN -> London stabilized
+        status = sm.get_session_status(now_utc=fake_london_time)
+        self.assertFalse(status.in_transition)
+        self.assertEqual(status.session_tag, "LONDON_20260910")
+
+        # Case A: Plan is from yesterday or previous session (e.g. ASIA)
+        old_plan = SessionConfig(
+            session_id="sess_asia",
+            symbol="XAUUSD",
+            generated_at="2026-09-10",
+            market_regime=MarketRegime.SIDEWAYS_RANGE,
+            resistance_zones=[],
+            support_zones=[],
+            setups_enabled={},
+            execution_rules={},
+            risk_management={},
+            news_filter={},
+            session_tag="ASIA_20260910"
+        )
+        self.assertFalse(sm.is_plan_valid_for_session(old_plan, status.session_tag))
+
+        # Case B: Plan has no tag at all
+        untagged_plan = SessionConfig(
+            session_id="sess_unknown",
+            symbol="XAUUSD",
+            generated_at="2026-09-10",
+            market_regime=MarketRegime.SIDEWAYS_RANGE,
+            resistance_zones=[],
+            support_zones=[],
+            setups_enabled={},
+            execution_rules={},
+            risk_management={},
+            news_filter={},
+            session_tag=None
+        )
+        self.assertFalse(sm.is_plan_valid_for_session(untagged_plan, status.session_tag))
+
+        # Case C: Fresh plan generated specifically for this London session
+        valid_london_plan = SessionConfig(
+            session_id="sess_london_20260910_0730",
+            symbol="XAUUSD",
+            generated_at="2026-09-10",
+            market_regime=MarketRegime.TRENDING_STEADY,
+            resistance_zones=[],
+            support_zones=[],
+            setups_enabled={},
+            execution_rules={},
+            risk_management={},
+            news_filter={},
+            session_tag="LONDON_20260910"
+        )
+        self.assertTrue(sm.is_plan_valid_for_session(valid_london_plan, status.session_tag))
+
+    def test_auto_replan_trigger_lifecycle(self):
+        """Tests auto re-plan trigger: fires once on stabilization, then marks completed."""
+        from datetime import datetime, timezone
+        from core.domain.rules.session_manager import SessionManager
+
+        sm = SessionManager()
+        fake_time = datetime(2026, 9, 10, 8, 0, 0, tzinfo=timezone.utc)
+        status = sm.get_session_status(now_utc=fake_time)
+
+        # Without valid plan loaded -> should trigger auto re-plan
+        self.assertTrue(sm.should_trigger_auto_replan(status, current_cfg=None))
+
+        # Mark re-plan started
+        sm.mark_replan_started()
+        self.assertFalse(sm.should_trigger_auto_replan(status, current_cfg=None))
+
+        # Mark completed
+        sm.mark_replan_completed(status.session_tag)
+        self.assertFalse(sm.should_trigger_auto_replan(status, current_cfg=None))
 
 if __name__ == "__main__":
     unittest.main()

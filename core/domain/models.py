@@ -154,6 +154,7 @@ class SessionConfig:
     execution_rules: Dict[str, Any]
     risk_management: Dict[str, Any]
     news_filter: Dict[str, Any]
+    session_tag: Optional[str] = None
 
 @dataclass
 class AuditReport:
