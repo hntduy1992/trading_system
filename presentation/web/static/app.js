@@ -549,7 +549,31 @@ async function generateAIPlan() {
 }
 
 async function deployPlanToServerA() {
-  alert("AI Session Plan approved and deployed to Server A successfully!");
+  const jsonArea = document.getElementById("ai-plan-json");
+  let cfg;
+  try {
+    cfg = JSON.parse(jsonArea.value);
+  } catch (err) {
+    alert("Kế hoạch JSON không hợp lệ. Vui lòng kiểm tra hoặc bấm 'Generate AI Plan' lại.");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${SERVER_A_URL}/api/deploy_plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      alert(`Đã nạp kế hoạch AI (${cfg.session_id || "Session"}) thành công vào Server A!\nChế độ thị trường: ${cfg.market_regime}`);
+      fetchSystemStatus();
+    } else {
+      alert(`Lỗi khi nạp kế hoạch vào Server A: ${data.detail || "Không rõ nguyên nhân"}`);
+    }
+  } catch (e) {
+    alert(`Lỗi kết nối tới Server A: ${e.message}`);
+  }
 }
 
 async function runHindsightAudit() {

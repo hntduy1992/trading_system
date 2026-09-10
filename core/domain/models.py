@@ -138,6 +138,8 @@ class TradeLifecycle:
     limit_order_ticket: Optional[int] = None
     stop_order_ticket: Optional[int] = None
     m1_bars_in_trade: int = 0
+    last_bar_timestamp: Optional[float] = None
+    anchor_id: Optional[str] = None
     close_time: Optional[float] = None
 
 @dataclass
