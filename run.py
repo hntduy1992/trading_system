@@ -51,7 +51,8 @@ class SystemOrchestrator:
             "symbol": symbol,
             "mode": mode,
             "session_config": None,
-            "active_trades": []
+            "active_trades": [],
+            "closed_trades": []
         }
 
         # 1. Dependency Injection: Core Infrastructure
@@ -157,8 +158,11 @@ class SystemOrchestrator:
                 for trade in list(active_trades):
                     await self.manage_lifecycle.update(trade, m1_bars, m3_bars)
                     if trade.state in [PositionState.FULLY_CLOSED, PositionState.SCRATCHED, PositionState.STOPPED_OUT]:
-                        # Save to session trade history
-                        pass
+                        self.evaluate_entry.record_trade_closed(trade)
+                        if trade in active_trades:
+                            active_trades.remove(trade)
+                        self.state["closed_trades"].append(trade)
+                        print(f"[ENGINE] Trade Finalized: {trade.trade_id} [{trade.state.value}]. Post-Trade Cooldown Active.")
 
                 # 3. Evaluate new setup entry
                 new_trade = await self.evaluate_entry.execute(
@@ -239,8 +243,22 @@ class SystemOrchestrator:
                     else:
                         cand_side, cand_setup, expected_entry, s1, t1, t2, lrp, dist = "NONE", "SCANNING", curr_p, curr_p, curr_p, curr_p, curr_p, 0
 
+                    radar_status = "SCANNING_APPROACH"
+                    max_losses = session_cfg.risk_management.get("max_consecutive_losses", 2) if session_cfg and session_cfg.risk_management else 2
+                    if self.evaluate_entry.consecutive_losses >= max_losses:
+                        radar_status = "CIRCUIT_BREAKER_PAUSED"
+                    else:
+                        cooldown_secs = session_cfg.execution_rules.get("post_trade_cooldown_seconds", 180) if session_cfg and session_cfg.execution_rules else 180
+                        now = time.time()
+                        time_since_close = now - self.evaluate_entry.last_trade_closed_time
+                        if self.evaluate_entry.last_trade_closed_time > 0 and time_since_close < cooldown_secs:
+                            rem = int(cooldown_secs - time_since_close)
+                            radar_status = f"COOLDOWN ({rem}s)"
+                        elif abs(dist) <= profile.sr_proximity_points:
+                            radar_status = "READY_TO_FIRE"
+
                     radar = {
-                        "status": "READY_TO_FIRE" if abs(dist) <= profile.sr_proximity_points else "SCANNING_APPROACH",
+                        "status": radar_status,
                         "setup": cand_setup,
                         "side": cand_side,
                         "entry": expected_entry,

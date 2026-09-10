@@ -41,6 +41,9 @@ class UpdateRiskConfigRequest(BaseModel):
     manual_tp1: Optional[float] = None
     manual_tp2: Optional[float] = None
 
+class DeployPlanRequest(BaseModel):
+    config: Dict[str, Any]
+
 def create_server_a_app(
     broker: IBrokerGateway,
     event_bus: IEventBus,
@@ -312,6 +315,46 @@ def create_server_a_app(
                     cfg.risk_management.pop("manual_tp2", None)
 
         return {"status": "SUCCESS", "risk_management": cfg.risk_management if cfg else {}}
+
+    @app.post("/api/deploy_plan")
+    async def deploy_plan(req: DeployPlanRequest):
+        cfg_data = req.config
+        try:
+            from core.domain.models import SessionConfig, MarketRegime, HTFZone, Significance
+            new_plan = SessionConfig(
+                session_id=cfg_data.get("session_id", "sess_custom"),
+                symbol=cfg_data.get("symbol", state_ref.get("symbol", "XAUUSD")),
+                generated_at=cfg_data.get("generated_at", ""),
+                market_regime=MarketRegime(cfg_data["market_regime"]),
+                resistance_zones=[
+                    HTFZone(id=z["id"], high=float(z["high"]), low=float(z["low"]), significance=Significance(z.get("significance", "MAJOR")), zone_type="RESISTANCE")
+                    for z in cfg_data.get("htf_zones", {}).get("resistance_zones", [])
+                ],
+                support_zones=[
+                    HTFZone(id=z["id"], high=float(z["high"]), low=float(z["low"]), significance=Significance(z.get("significance", "MAJOR")), zone_type="SUPPORT")
+                    for z in cfg_data.get("htf_zones", {}).get("support_zones", [])
+                ],
+                setups_enabled=cfg_data.get("setups_enabled", {}),
+                execution_rules=cfg_data.get("execution_rules", {}),
+                risk_management=cfg_data.get("risk_management", {}),
+                news_filter=cfg_data.get("news_filter", {})
+            )
+            state_ref["session_config_obj"] = new_plan
+            state_ref["session_config"] = {
+                "session_id": new_plan.session_id,
+                "symbol": new_plan.symbol,
+                "market_regime": new_plan.market_regime.value,
+                "setups_enabled": new_plan.setups_enabled
+            }
+            await event_bus.publish("plan_deployed", {
+                "session_id": new_plan.session_id,
+                "market_regime": new_plan.market_regime.value,
+                "setups_enabled": new_plan.setups_enabled
+            })
+            print(f"[SERVER A] Deployed new AI Session Plan: {new_plan.session_id} (Regime={new_plan.market_regime.value})")
+            return {"status": "SUCCESS", "message": f"Plan {new_plan.session_id} deployed to Server A successfully!"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid plan format: {e}")
 
     @app.websocket("/ws/telemetry")
     async def websocket_telemetry(websocket: WebSocket):

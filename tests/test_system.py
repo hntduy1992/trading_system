@@ -179,6 +179,158 @@ class TestYTCSystem(unittest.TestCase):
         self.assertEqual(paper.orders[ticket]["sl"], 2648.00)
         self.assertEqual(paper.orders[ticket]["tp"], 2665.00)
 
+    def test_safe_holding_and_bar_timestamp_counter(self):
+        """Tests that 1s engine loops with the same M1 bar do NOT prematurely increment m1_bars_in_trade."""
+        import asyncio
+        from infrastructure.brokers.paper_broker import PaperBroker
+        from infrastructure.bus.async_event_bus import AsyncEventBus
+        from core.use_cases.execution.manage_lifecycle import ManageLifecycleUseCase
+        from core.domain.models import TradeLifecycle, PositionPart, PositionState, OrderSide, SetupType
+
+        paper = PaperBroker()
+        bus = AsyncEventBus()
+        lifecycle_uc = ManageLifecycleUseCase(paper, bus)
+
+        trade = TradeLifecycle(
+            trade_id="test_safe_hold_1",
+            symbol="XAUUSD",
+            setup_type=SetupType.TST,
+            side=OrderSide.BUY,
+            state=PositionState.IN_POSITION,
+            part1=PositionPart(1, 0.1, 2650.0, 2640.0, 2660.0),
+            part2=PositionPart(2, 0.1, 2650.0, 2640.0, 2670.0),
+            open_time=1000.0,
+            m1_bars_in_trade=0,
+            last_bar_timestamp=None
+        )
+
+        bar_1 = Bar(timestamp=60.0, open=2650.0, high=2652.0, low=2649.0, close=2651.0)
+        # Simulate 100 ticks / loop iterations with the exact same M1 bar (timestamp 60.0)
+        for _ in range(100):
+            asyncio.run(lifecycle_uc.update(trade, [bar_1], [], scratch_timeout_bars=8, min_holding_bars=3))
+
+        # Must be exactly 1 bar, not 100!
+        self.assertEqual(trade.m1_bars_in_trade, 1)
+        self.assertEqual(trade.state, PositionState.IN_POSITION)
+
+        # Feed second distinct M1 bar
+        bar_2 = Bar(timestamp=120.0, open=2651.0, high=2653.0, low=2650.0, close=2652.0)
+        asyncio.run(lifecycle_uc.update(trade, [bar_2], [], scratch_timeout_bars=8, min_holding_bars=3))
+        self.assertEqual(trade.m1_bars_in_trade, 2)
+        # At 2 bars (< min_holding_bars=3), it must NOT scratch
+        self.assertEqual(trade.state, PositionState.IN_POSITION)
+
+    def test_single_entry_per_swing_anchor_and_cooldown(self):
+        """Tests that once an entry occurs, the swing anchor is consumed and post-trade cooldown blocks re-entry."""
+        import asyncio
+        import time
+        from infrastructure.brokers.paper_broker import PaperBroker
+        from infrastructure.bus.async_event_bus import AsyncEventBus
+        from core.use_cases.execution.evaluate_entry import EvaluateEntryUseCase
+        from core.domain.models import SessionConfig, MarketRegime, HTFZone
+
+        paper = PaperBroker()
+        bus = AsyncEventBus()
+        entry_uc = EvaluateEntryUseCase(paper, bus)
+
+        config = SessionConfig(
+            session_id="test_sess",
+            symbol="XAUUSD",
+            generated_at="2026-09-10",
+            market_regime=MarketRegime.SIDEWAYS_RANGE,
+            resistance_zones=[HTFZone("R1", 2670.0, 2665.0)],
+            support_zones=[HTFZone("S1", 2645.0, 2640.0)],
+            setups_enabled={"TST": True, "BOF": False, "BPB": False, "PB": False, "CPB": False},
+            execution_rules={"post_trade_cooldown_seconds": 180},
+            risk_management={"fixed_lot_size": 0.1, "max_consecutive_losses": 2, "max_session_trades": 6},
+            news_filter={}
+        )
+
+        bars_m3 = [
+            Bar(300, 2655.0, 2660.0, 2650.0, 2652.0),
+            Bar(600, 2652.0, 2655.0, 2646.0, 2648.0),
+            Bar(900, 2648.0, 2650.0, 2640.0, 2645.0), # Swing Low at 2640.0
+            Bar(1200, 2645.0, 2652.0, 2644.0, 2649.0),
+            Bar(1500, 2649.0, 2655.0, 2646.0, 2650.0),
+        ]
+        bars_m1 = [
+            Bar(1440, 2645.5, 2646.0, 2644.5, 2645.0),
+            Bar(1500, 2645.0, 2645.5, 2644.0, 2644.8)
+        ]
+
+        # 1. First execution creates trade
+        first_trade = asyncio.run(entry_uc.execute(config, [], bars_m3, bars_m1, []))
+        self.assertIsNotNone(first_trade)
+        self.assertIn(first_trade.anchor_id, entry_uc.consumed_anchors)
+
+        # 2. Immediate second call with active_trades empty (e.g. price oscillating at same swing anchor)
+        second_trade = asyncio.run(entry_uc.execute(config, [], bars_m3, bars_m1, []))
+        # Must be rejected because anchor was consumed!
+        self.assertIsNone(second_trade)
+
+        # 3. Test post-trade cooldown
+        entry_uc.consumed_anchors.clear()
+        entry_uc.last_trade_closed_time = time.time() - 60 # 60s ago (< 180s cooldown)
+        cooldown_trade = asyncio.run(entry_uc.execute(config, [], bars_m3, bars_m1, []))
+        self.assertIsNone(cooldown_trade)
+
+        # Once cooldown passes (> 180s)
+        entry_uc.last_trade_closed_time = time.time() - 200
+        allowed_trade = asyncio.run(entry_uc.execute(config, [], bars_m3, bars_m1, []))
+        self.assertIsNotNone(allowed_trade)
+
+    def test_circuit_breaker_consecutive_losses(self):
+        """Tests that circuit breaker engages and halts entries when max consecutive losses is hit."""
+        import asyncio
+        from infrastructure.brokers.paper_broker import PaperBroker
+        from infrastructure.bus.async_event_bus import AsyncEventBus
+        from core.use_cases.execution.evaluate_entry import EvaluateEntryUseCase
+        from core.domain.models import SessionConfig, MarketRegime, HTFZone, TradeLifecycle, PositionPart, PositionState, SetupType, OrderSide
+
+        paper = PaperBroker()
+        bus = AsyncEventBus()
+        entry_uc = EvaluateEntryUseCase(paper, bus)
+
+        config = SessionConfig(
+            session_id="test_cb",
+            symbol="XAUUSD",
+            generated_at="2026-09-10",
+            market_regime=MarketRegime.SIDEWAYS_RANGE,
+            resistance_zones=[],
+            support_zones=[HTFZone("S1", 2645.0, 2640.0)],
+            setups_enabled={"TST": True},
+            execution_rules={"post_trade_cooldown_seconds": 0},
+            risk_management={"max_consecutive_losses": 2},
+            news_filter={}
+        )
+
+        dummy_loss = TradeLifecycle(
+            trade_id="loss_1",
+            symbol="XAUUSD",
+            setup_type=SetupType.TST,
+            side=OrderSide.BUY,
+            state=PositionState.STOPPED_OUT,
+            part1=PositionPart(1, 0.1, 2645.0, 2640.0, 2655.0),
+            part2=PositionPart(2, 0.1, 2645.0, 2640.0, 2665.0),
+            open_time=100.0,
+            close_time=200.0
+        )
+
+        # Record 1st loss
+        entry_uc.record_trade_closed(dummy_loss)
+        self.assertEqual(entry_uc.consecutive_losses, 1)
+
+        # Record 2nd loss
+        entry_uc.record_trade_closed(dummy_loss)
+        self.assertEqual(entry_uc.consecutive_losses, 2)
+
+        bars_m3 = [Bar(i*300, 2645.0, 2646.0, 2644.0, 2645.0) for i in range(1, 6)]
+        bars_m1 = [Bar(100, 2645.0, 2645.5, 2644.5, 2645.0)]
+
+        # Should be blocked by circuit breaker
+        blocked_trade = asyncio.run(entry_uc.execute(config, [], bars_m3, bars_m1, []))
+        self.assertIsNone(blocked_trade)
+
 if __name__ == "__main__":
     unittest.main()
 
