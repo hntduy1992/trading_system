@@ -567,7 +567,7 @@ async function deployPlanToServerA() {
     const data = await res.json();
     if (res.ok) {
       alert(`Đã nạp kế hoạch AI (${cfg.session_id || "Session"}) thành công vào Server A!\nChế độ thị trường: ${cfg.market_regime}`);
-      fetchSystemStatus();
+      fetchStatus();
     } else {
       alert(`Lỗi khi nạp kế hoạch vào Server A: ${data.detail || "Không rõ nguyên nhân"}`);
     }
