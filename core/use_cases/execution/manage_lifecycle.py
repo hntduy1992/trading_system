@@ -22,10 +22,14 @@ class ManageLifecycleUseCase:
         trade: TradeLifecycle,
         bars_m1: List[Bar],
         bars_m3: List[Bar],
-        scratch_timeout_bars: int = 5
+        scratch_timeout_bars: int = 8,
+        min_holding_bars: int = 3
     ) -> TradeLifecycle:
         """
         Processes new bar events and transitions trade through lifecycle states.
+        Safeguards:
+          - Bars counted strictly on actual M1 bar timestamp changes (prevents 1s tick over-counting).
+          - Minimum holding bars enforced before evaluating scratch rule.
         """
         if trade.state in [PositionState.FULLY_CLOSED, PositionState.SCRATCHED, PositionState.STOPPED_OUT]:
             return trade
@@ -63,6 +67,7 @@ class ManageLifecycleUseCase:
             if filled:
                 trade.state = PositionState.IN_POSITION
                 trade.m1_bars_in_trade = 0
+                trade.last_bar_timestamp = curr_bar.timestamp
                 await self.event_bus.publish("telemetry", {
                     "type": "ORDER_FILLED",
                     "trade_id": trade.trade_id,
@@ -71,7 +76,13 @@ class ManageLifecycleUseCase:
             return trade
 
         # 2. State: IN_POSITION
-        trade.m1_bars_in_trade += 1
+        # Strictly increment bar counter ONLY when a new M1 bar timestamp occurs
+        if trade.last_bar_timestamp is None:
+            trade.last_bar_timestamp = curr_bar.timestamp
+            trade.m1_bars_in_trade = 1
+        elif trade.last_bar_timestamp != curr_bar.timestamp:
+            trade.last_bar_timestamp = curr_bar.timestamp
+            trade.m1_bars_in_trade += 1
 
         # Check Stop Loss hit
         sl_hit = False
@@ -127,23 +138,25 @@ class ManageLifecycleUseCase:
             return trade
 
         # 3. Check Scratch Rule (Premise Threatened)
-        is_scratch, scratch_reason = RiskManager.evaluate_scratch_rule(
-            bars_in_trade=trade.m1_bars_in_trade,
-            scratch_timeout_bars=scratch_timeout_bars
-        )
-        if is_scratch and trade.state == PositionState.IN_POSITION:
-            trade.state = PositionState.SCRATCHED
-            trade.close_time = time.time()
-            if trade.part1.ticket and not trade.part1.is_closed:
-                await self.broker.close_position(trade.part1.ticket)
-            if trade.part2.ticket and not trade.part2.is_closed:
-                await self.broker.close_position(trade.part2.ticket)
-            await self.event_bus.publish("telemetry", {
-                "type": "SCRATCH_TRIGGERED",
-                "trade_id": trade.trade_id,
-                "reason": scratch_reason
-            })
-            return trade
+        # Only evaluate scratch if trade has had minimum safe holding time to breathe
+        if trade.m1_bars_in_trade >= min_holding_bars and trade.state == PositionState.IN_POSITION:
+            is_scratch, scratch_reason = RiskManager.evaluate_scratch_rule(
+                bars_in_trade=trade.m1_bars_in_trade,
+                scratch_timeout_bars=scratch_timeout_bars
+            )
+            if is_scratch:
+                trade.state = PositionState.SCRATCHED
+                trade.close_time = time.time()
+                if trade.part1.ticket and not trade.part1.is_closed:
+                    await self.broker.close_position(trade.part1.ticket)
+                if trade.part2.ticket and not trade.part2.is_closed:
+                    await self.broker.close_position(trade.part2.ticket)
+                await self.event_bus.publish("telemetry", {
+                    "type": "SCRATCH_TRIGGERED",
+                    "trade_id": trade.trade_id,
+                    "reason": scratch_reason
+                })
+                return trade
 
         # 4. State: TRAILING_STOP (Part 2)
         if trade.state == PositionState.TRAILING_STOP:
