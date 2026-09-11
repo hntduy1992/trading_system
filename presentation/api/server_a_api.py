@@ -40,17 +40,51 @@ class UpdateRiskConfigRequest(BaseModel):
     manual_sl: Optional[float] = None
     manual_tp1: Optional[float] = None
     manual_tp2: Optional[float] = None
+    enable_ai_pre_entry: Optional[bool] = None
+    min_ai_confidence: Optional[float] = None
 
 class DeployPlanRequest(BaseModel):
     config: Dict[str, Any]
+
+def serialize_trade(t: Any) -> Dict[str, Any]:
+    if isinstance(t, dict):
+        return t
+    p1 = t.part1.__dict__ if hasattr(t.part1, "__dict__") else (t.part1 if isinstance(t.part1, dict) else {})
+    p2 = t.part2.__dict__ if hasattr(t.part2, "__dict__") else (t.part2 if isinstance(t.part2, dict) else {})
+    return {
+        "trade_id": t.trade_id,
+        "symbol": t.symbol,
+        "setup": t.setup_type.value if hasattr(t.setup_type, "value") else str(t.setup_type),
+        "side": t.side.value if hasattr(t.side, "value") else str(t.side),
+        "state": t.state.value if hasattr(t.state, "value") else str(t.state),
+        "part1": p1,
+        "part2": p2,
+        "open_time": t.open_time,
+        "close_time": t.close_time,
+        "bars_in_trade": t.m1_bars_in_trade,
+        "anchor_id": t.anchor_id,
+        "entry_context": getattr(t, "entry_context", None) or {},
+        "close_context": getattr(t, "close_context", None) or {}
+    }
 
 def create_server_a_app(
     broker: IBrokerGateway,
     event_bus: IEventBus,
     circuit_breaker: CircuitBreakerUseCase,
-    state_ref: Dict[str, Any]
+    state_ref: Dict[str, Any],
+    json_store: Any = None
 ) -> FastAPI:
     app = FastAPI(title="Server A - Real-Time Execution Engine", version="2.1.0-STRICT")
+
+    # Load persistent closed trades from disk if available
+    if json_store and hasattr(json_store, "load_session_trades"):
+        try:
+            persisted = json_store.load_session_trades()
+            if persisted and not state_ref.get("closed_trades"):
+                state_ref["closed_trades"] = persisted
+                print(f"[Server A] Loaded {len(persisted)} historical trades from disk.")
+        except Exception as e:
+            print(f"[Server A] Could not load persisted session trades: {e}")
 
     app.add_middleware(
         CORSMiddleware,
@@ -133,20 +167,20 @@ def create_server_a_app(
 
     @app.get("/api/trades")
     async def get_trades():
-        trades: List[TradeLifecycle] = state_ref.get("active_trades", [])
-        return [
-            {
-                "trade_id": t.trade_id,
-                "symbol": t.symbol,
-                "setup": t.setup_type.value,
-                "side": t.side.value,
-                "state": t.state.value,
-                "part1": t.part1.__dict__,
-                "part2": t.part2.__dict__,
-                "bars_in_trade": t.m1_bars_in_trade
-            }
-            for t in trades
-        ]
+        trades = state_ref.get("active_trades", [])
+        return [serialize_trade(t) for t in trades]
+
+    @app.get("/api/trades/history")
+    async def get_trade_history():
+        closed = state_ref.get("closed_trades", [])
+        active = state_ref.get("active_trades", [])
+        return {
+            "symbol": state_ref.get("symbol", "XAUUSD"),
+            "closed_trades": [serialize_trade(t) for t in closed],
+            "active_trades": [serialize_trade(t) for t in active],
+            "total_closed": len(closed),
+            "total_active": len(active)
+        }
 
     @app.post("/api/emergency/panic_close")
     async def panic_close():
@@ -213,6 +247,25 @@ def create_server_a_app(
 
         initial_state = PositionState.IN_POSITION if req.order_type.upper() == "MARKET" else PositionState.PENDING_ENTRY
 
+        entry_ctx = {
+            "symbol": sym,
+            "session_id": state_ref.get("session_config", {}).get("session_id", "manual_session"),
+            "session_tag": state_ref.get("session_config", {}).get("session_tag"),
+            "market_regime": state_ref.get("session_config", {}).get("market_regime", "MANUAL"),
+            "setup": "MANUAL",
+            "side": side.value,
+            "order_type": req.order_type.upper(),
+            "order_price": float(order_price),
+            "sl": float(sl_val),
+            "tp1": float(tp_val),
+            "tp2": float(tp_val),
+            "total_volume": lot_total,
+            "lots": {"total": lot_total, "p1": lot_p1, "p2": lot_p2},
+            "timestamp": time.time(),
+            "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "comment": req.comment
+        }
+
         lifecycle = TradeLifecycle(
             trade_id=trade_id,
             symbol=sym,
@@ -223,7 +276,8 @@ def create_server_a_app(
             part2=PositionPart(2, lot_p2, float(order_price), float(sl_val), float(tp_val), ticket=ticket),
             open_time=time.time(),
             limit_order_ticket=ticket if req.order_type.upper() == "LIMIT" else None,
-            stop_order_ticket=ticket if req.order_type.upper() == "STOP" else None
+            stop_order_ticket=ticket if req.order_type.upper() == "STOP" else None,
+            entry_context=entry_ctx
         )
 
         trades: List[TradeLifecycle] = state_ref.get("active_trades", [])
@@ -271,6 +325,7 @@ def create_server_a_app(
     async def get_risk_config():
         cfg: SessionConfig = state_ref.get("session_config_obj")
         rm = cfg.risk_management if cfg else {}
+        ex = cfg.execution_rules if cfg else {}
         radar = state_ref.get("setup_radar", {})
         return {
             "fixed_lot_size": rm.get("fixed_lot_size"),
@@ -278,6 +333,8 @@ def create_server_a_app(
             "manual_sl": rm.get("manual_sl"),
             "manual_tp1": rm.get("manual_tp1"),
             "manual_tp2": rm.get("manual_tp2"),
+            "enable_ai_pre_entry": ex.get("enable_ai_pre_entry", True),
+            "min_ai_confidence": ex.get("min_ai_confidence", 0.65),
             "suggested": {
                 "lot_total": radar.get("lot_total", 0.17 if "XAU" in state_ref.get("symbol", "XAUUSD") else 0.50),
                 "sl": radar.get("s1"),
@@ -313,8 +370,20 @@ def create_server_a_app(
                     cfg.risk_management["manual_tp2"] = float(req.manual_tp2)
                 else:
                     cfg.risk_management.pop("manual_tp2", None)
+            if req.enable_ai_pre_entry is not None:
+                if not hasattr(cfg, "execution_rules") or cfg.execution_rules is None:
+                    cfg.execution_rules = {}
+                cfg.execution_rules["enable_ai_pre_entry"] = bool(req.enable_ai_pre_entry)
+            if req.min_ai_confidence is not None and req.min_ai_confidence > 0:
+                if not hasattr(cfg, "execution_rules") or cfg.execution_rules is None:
+                    cfg.execution_rules = {}
+                cfg.execution_rules["min_ai_confidence"] = float(req.min_ai_confidence)
 
-        return {"status": "SUCCESS", "risk_management": cfg.risk_management if cfg else {}}
+        return {
+            "status": "SUCCESS",
+            "risk_management": cfg.risk_management if cfg else {},
+            "execution_rules": cfg.execution_rules if cfg else {}
+        }
 
     @app.post("/api/deploy_plan")
     async def deploy_plan(req: DeployPlanRequest):

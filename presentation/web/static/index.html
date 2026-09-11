@@ -167,6 +167,37 @@
           </div>
         </div>
 
+        <!-- Nhật ký Giao dịch Đã đóng (Closed Trades & Context) -->
+        <div class="card">
+          <div class="card-title">
+            <span>📖 Nhật ký Giao dịch & Hoàn cảnh vào lệnh (Closed Trades Journal)</span>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span id="history-count" style="font-size:11px; color:#8b949e;">0 Closed</span>
+              <button class="btn btn-primary" style="padding:2px 8px; font-size:11px;" onclick="fetchTradeHistory()">🔄 Làm mới</button>
+            </div>
+          </div>
+          <div style="overflow-x:auto; max-height:230px; flex:1;">
+            <table id="history-table">
+              <thead>
+                <tr>
+                  <th>Trade ID</th>
+                  <th>Thời gian vào</th>
+                  <th>Setup & Bối cảnh</th>
+                  <th>Side</th>
+                  <th>Giá vào</th>
+                  <th>SL / TP1</th>
+                  <th>Vùng Wholesale (LWP/LRP)</th>
+                  <th>Kết quả</th>
+                  <th>Lý do thoát lệnh</th>
+                </tr>
+              </thead>
+              <tbody id="history-tbody">
+                <tr><td colspan="9" style="text-align:center; color:#8b949e;">Chưa có lệnh hoàn tất nào trong phiên.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- Cấu hình Khối lượng & Quản lý Rủi ro (Tự động hoặc Thủ công) -->
         <div class="card" style="margin-bottom: 2px;">
           <div class="card-title">
@@ -206,6 +237,22 @@
               <input id="cfg-tp-input" class="form-control" type="number" step="0.01" placeholder="Auto (Mục tiêu T1)" />
             </div>
           </div>
+
+          <!-- AI Gatekeeper Pre-Entry Evaluation Setting -->
+          <div style="margin-top: 10px; padding: 8px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="cfg-ai-pre-entry-input" checked style="cursor:pointer; width:16px; height:16px;" />
+              <label for="cfg-ai-pre-entry-input" style="font-size: 12px; font-weight: 600; color: #f0f6fc; cursor:pointer;">
+                🛡️ AI Pre-Entry Gatekeeper (Đánh giá & Phê duyệt điểm vào lệnh trước khi gửi Broker/MT5)
+              </label>
+              <span id="ai-gatekeeper-badge" style="background:#0f2d1e; border:1px solid #3fb950; color:#3fb950; padding:1px 6px; border-radius:4px; font-size:10px; font-weight: bold;">AI ACTIVE</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
+              <label for="cfg-ai-confidence-input" style="color: #8b949e;">Ngưỡng tin cậy (Min Confidence):</label>
+              <input id="cfg-ai-confidence-input" class="form-control" type="number" step="0.05" min="0.1" max="1.0" value="0.65" style="width: 75px; text-align: center; padding: 3px 6px;" />
+            </div>
+          </div>
+
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top: 8px;">
             <button class="btn btn-warning" style="padding:4px 12px; font-size:11px;" onclick="resetRiskConfigToAuto()">🔄 Đặt lại về Gợi Ý Tự Động (Reset)</button>
             <button class="btn btn-primary" style="padding:4px 14px; font-size:11px;" onclick="saveRiskConfig()">💾 Lưu Cấu Hình Khối Lượng & SL/TP</button>
@@ -288,16 +335,19 @@
         </div>
 
         <!-- Post-Session Hindsight Audit -->
-        <div class="card">
+        <div class="card" style="display:flex; flex-direction:column;">
           <div class="card-title">
-            <span>Post-Session Hindsight Audit</span>
-            <button class="btn btn-primary" onclick="runHindsightAudit()">🔍 Run Audit</button>
+            <span>Post-Session Hindsight Audit (Lance Beggs YTC + AI Review)</span>
+            <div style="display:flex; gap:8px;">
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="loadLatestAudit()">📜 Xem Báo Cáo Gần Nhất</button>
+              <button class="btn btn-primary" style="padding:4px 12px; font-size:11px;" onclick="runHindsightAudit()">🔍 Đánh Giá Bằng AI (Run Audit)</button>
+            </div>
           </div>
-          <p style="font-size:12px; color:#8b949e;">
-            Lance Beggs 4 questions: Expectation vs Reality, Missed Setups, Compliance Score & Dynamic Self-Optimization.
+          <p style="font-size:12px; color:#8b949e; margin-bottom:8px;">
+            Hệ thống sẽ tập hợp toàn bộ <strong>Nhật ký giao dịch (kèm hoàn cảnh vào lệnh)</strong> của phiên và gửi đến AI để đánh giá lại <strong>cách tính Trading Plan</strong> (S/R zones, Market Regime, Matrix Setups, Wholesale Engine & tham số).
           </p>
-          <div id="audit-output" style="background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:12px; font-size:12px; flex:1; overflow-y:auto;">
-            <div style="color:#8b949e;">No audit executed yet for this session.</div>
+          <div id="audit-output" style="background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:14px; font-size:12px; flex:1; overflow-y:auto; min-height:260px; max-height:600px;">
+            <div style="color:#8b949e; text-align:center; padding:20px 0;">Chưa thực hiện kiểm toán (Audit) cho phiên này. Hãy thực hiện giao dịch hoặc bấm "🔍 Đánh Giá Bằng AI" để phân tích.</div>
           </div>
         </div>
       </div>

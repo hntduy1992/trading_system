@@ -1,44 +1,44 @@
 {
-  "session_id": "sess_20260910_084510",
+  "session_id": "sess_20260910_203315",
   "symbol": "XAUUSD",
-  "generated_at": "2026-09-10T01:45:10.494871+00:00",
-  "market_regime": "SIDEWAYS_RANGE",
+  "generated_at": "2026-09-10T13:33:15.751160+00:00",
+  "market_regime": "TRENDING_STEADY",
   "htf_zones": {
     "resistance_zones": [
       {
         "id": "res_maj_1",
-        "high": 4432.26,
-        "low": 4427.69,
+        "high": 4435.08,
+        "low": 4429.52,
         "significance": "MAJOR"
       },
       {
         "id": "res_min_1",
-        "high": 4419.1,
-        "low": 4416.36,
+        "high": 4401.82,
+        "low": 4398.49,
         "significance": "MINOR"
       }
     ],
     "support_zones": [
       {
         "id": "sup_maj_1",
-        "high": 4379.67,
-        "low": 4375.1,
+        "high": 4329.52,
+        "low": 4323.97,
         "significance": "MAJOR"
       },
       {
         "id": "sup_min_1",
-        "high": 4402.65,
-        "low": 4399.91,
+        "high": 4325.64,
+        "low": 4322.3,
         "significance": "MINOR"
       }
     ]
   },
   "setups_enabled": {
-    "TST": true,
-    "BOF": true,
-    "BPB": false,
-    "PB": false,
-    "CPB": false
+    "TST": false,
+    "BOF": false,
+    "BPB": true,
+    "PB": true,
+    "CPB": true
   },
   "execution_rules": {
     "min_rr_ratio_part1": 1.0,

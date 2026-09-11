@@ -94,6 +94,19 @@ class ManageLifecycleUseCase:
         if sl_hit:
             trade.state = PositionState.STOPPED_OUT
             trade.close_time = time.time()
+            trade.part1.is_closed = True
+            trade.part1.close_price = trade.part1.sl_price
+            trade.part2.is_closed = True
+            trade.part2.close_price = trade.part1.sl_price
+            trade.close_context = {
+                "close_state": "STOPPED_OUT",
+                "close_reason": "INITIAL_STOP_LOSS_HIT",
+                "exit_price_part1": trade.part1.close_price,
+                "exit_price_part2": trade.part2.close_price,
+                "bars_in_trade": trade.m1_bars_in_trade,
+                "close_time": trade.close_time,
+                "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+            }
             if trade.part1.ticket:
                 await self.broker.close_position(trade.part1.ticket)
             if trade.part2.ticket:
@@ -162,6 +175,19 @@ class ManageLifecycleUseCase:
             if is_scratch:
                 trade.state = PositionState.SCRATCHED
                 trade.close_time = time.time()
+                trade.part1.is_closed = True
+                trade.part1.close_price = curr_price
+                trade.part2.is_closed = True
+                trade.part2.close_price = curr_price
+                trade.close_context = {
+                    "close_state": "SCRATCHED",
+                    "close_reason": scratch_reason,
+                    "exit_price_part1": curr_price,
+                    "exit_price_part2": curr_price,
+                    "bars_in_trade": trade.m1_bars_in_trade,
+                    "close_time": trade.close_time,
+                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                }
                 if trade.part1.ticket and not trade.part1.is_closed:
                     await self.broker.close_position(trade.part1.ticket)
                 if trade.part2.ticket and not trade.part2.is_closed:
@@ -175,6 +201,35 @@ class ManageLifecycleUseCase:
 
         # 4. State: TRAILING_STOP (Part 2)
         if trade.state == PositionState.TRAILING_STOP:
+            # Check Part 2 Trailing SL / Breakeven Hit
+            part2_sl_hit = False
+            if trade.side == OrderSide.BUY and curr_bar.low <= trade.part2.sl_price:
+                part2_sl_hit = True
+            elif trade.side == OrderSide.SELL and curr_bar.high >= trade.part2.sl_price:
+                part2_sl_hit = True
+
+            if part2_sl_hit:
+                trade.state = PositionState.FULLY_CLOSED
+                trade.close_time = time.time()
+                trade.part2.is_closed = True
+                trade.part2.close_price = trade.part2.sl_price
+                if trade.part2.ticket:
+                    await self.broker.close_position(trade.part2.ticket)
+                trade.close_context = {
+                    "close_state": "FULLY_CLOSED",
+                    "close_reason": "PART2_TRAILING_SL_HIT_AFTER_T1",
+                    "exit_price_part1": trade.part1.close_price,
+                    "exit_price_part2": trade.part2.close_price,
+                    "bars_in_trade": trade.m1_bars_in_trade,
+                    "close_time": trade.close_time,
+                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                }
+                await self.event_bus.publish("telemetry", {
+                    "type": "PART2_BE_HIT_FULLY_CLOSED",
+                    "trade_id": trade.trade_id
+                })
+                return trade
+
             # Check T2 Target Hit
             t2_hit = False
             if trade.side == OrderSide.BUY and curr_bar.high >= trade.part2.tp_price:
@@ -185,6 +240,17 @@ class ManageLifecycleUseCase:
             if t2_hit:
                 trade.state = PositionState.FULLY_CLOSED
                 trade.close_time = time.time()
+                trade.part2.is_closed = True
+                trade.part2.close_price = trade.part2.tp_price
+                trade.close_context = {
+                    "close_state": "FULLY_CLOSED",
+                    "close_reason": "T2_TARGET_HIT",
+                    "exit_price_part1": trade.part1.close_price,
+                    "exit_price_part2": trade.part2.close_price,
+                    "bars_in_trade": trade.m1_bars_in_trade,
+                    "close_time": trade.close_time,
+                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                }
                 if trade.part2.ticket:
                     await self.broker.close_position(trade.part2.ticket)
                 await self.event_bus.publish("telemetry", {

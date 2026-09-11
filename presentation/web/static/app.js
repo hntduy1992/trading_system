@@ -363,7 +363,18 @@ function handleTelemetryMessage(msg) {
 
   if (msg.topic === "telemetry" || msg.topic === "trade_opened" || msg.topic === "emergency") {
     const payload = msg.payload || msg;
-    logTelemetry(`[${msg.topic.toUpperCase()}] ${JSON.stringify(payload)}`);
+    if (payload && payload.type === "AI_PRE_ENTRY_EVALUATING") {
+      logTelemetry(`🤖 [AI GATEKEEPER] Đang đánh giá điểm vào lệnh ${payload.symbol} ${payload.side} @ ${payload.entry} (Model: ${payload.model || 'AI'})...`);
+    } else if (payload && payload.type === "AI_ENTRY_APPROVED") {
+      logTelemetry(`✅ [AI APPROVED] Điểm vào lệnh ${payload.symbol} ${payload.side} @ ${payload.entry} ĐÃ ĐƯỢC CHẤP THUẬN! (Tin cậy: ${(payload.confidence * 100).toFixed(0)}%) - ${payload.reason}`);
+    } else if (payload && payload.type === "AI_ENTRY_VETOED") {
+      const concerns = payload.concerns && payload.concerns.length ? ` | Cảnh báo: ${payload.concerns.join("; ")}` : "";
+      logTelemetry(`🚫 [AI VETOED] Từ chối vào lệnh ${payload.symbol} ${payload.side} @ ${payload.entry}! (Tin cậy: ${(payload.confidence * 100).toFixed(0)}%) - Lý do: ${payload.reason}${concerns}`);
+    } else if (payload && payload.type === "AI_ENTRY_EVAL_TIMEOUT") {
+      logTelemetry(`⚠️ [AI TIMEOUT] Hết thời gian chờ AI đánh giá pre-entry (${payload.reason}). Áp dụng chính sách fallback: ${payload.policy}`);
+    } else {
+      logTelemetry(`[${msg.topic.toUpperCase()}] ${JSON.stringify(payload)}`);
+    }
     fetchPositions();
     fetchStatus();
   }
@@ -576,35 +587,255 @@ async function deployPlanToServerA() {
   }
 }
 
+let closedTradesData = [];
+
+async function fetchTradeHistory() {
+  try {
+    const res = await fetch(`${SERVER_A_URL}/api/trades/history`);
+    if (res.ok) {
+      const data = await res.json();
+      const closed = data.closed_trades || [];
+      closedTradesData = closed;
+      const countEl = document.getElementById("history-count");
+      if (countEl) countEl.textContent = `${closed.length} Closed`;
+
+      const tbody = document.getElementById("history-tbody");
+      if (!tbody) return;
+
+      if (closed.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color:#8b949e;">Chưa có lệnh hoàn tất nào trong phiên.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = closed.map(t => {
+        const eCtx = t.entry_context || {};
+        const cCtx = t.close_context || {};
+        const sideColor = t.side === 'BUY' ? '#3fb950' : '#f85149';
+        
+        let stateBadge = '<span style="background:#21262d; color:#8b949e; padding:2px 6px; border-radius:4px;">UNKNOWN</span>';
+        if (t.state === 'FULLY_CLOSED') {
+          stateBadge = '<span style="background:#0f2d1e; color:#3fb950; border:1px solid #238636; padding:2px 6px; border-radius:4px; font-weight:bold;">T1/T2 HIT</span>';
+        } else if (t.state === 'STOPPED_OUT') {
+          stateBadge = '<span style="background:#3b1219; color:#f85149; border:1px solid #da3633; padding:2px 6px; border-radius:4px; font-weight:bold;">STOPPED OUT</span>';
+        } else if (t.state === 'SCRATCHED') {
+          stateBadge = '<span style="background:#3d2e05; color:#e3b341; border:1px solid #9e6a03; padding:2px 6px; border-radius:4px; font-weight:bold;">SCRATCHED</span>';
+        }
+
+        const ws = eCtx.wholesale || {};
+        const wsText = ws.LWP ? `LWP: ${ws.LWP} | LRP: ${ws.LRP} (R:R: ${(ws.rr_ratio_part1||0).toFixed(1)})` : '--';
+        const entryPrice = eCtx.order_price ? Number(eCtx.order_price).toFixed(2) : (t.part1 ? Number(t.part1.entry_price).toFixed(2) : '--');
+        const slPrice = eCtx.sl ? Number(eCtx.sl).toFixed(2) : (t.part1 ? Number(t.part1.sl_price).toFixed(2) : '--');
+        const tpPrice = eCtx.tp1 ? Number(eCtx.tp1).toFixed(2) : (t.part1 ? Number(t.part1.tp_price).toFixed(2) : '--');
+        const timeStr = eCtx.time_str || (t.open_time ? new Date(t.open_time * 1000).toLocaleTimeString() : '--');
+        const regimeStr = eCtx.market_regime ? `<br><small style="color:#8b949e;">${eCtx.market_regime}</small>` : '';
+        const exitReason = cCtx.close_reason || t.state;
+
+        return `
+          <tr>
+            <td><code>${t.trade_id}</code></td>
+            <td style="color:#8b949e; font-size:11px;">${timeStr}</td>
+            <td><strong>${t.setup}</strong> ${regimeStr}</td>
+            <td style="color:${sideColor}; font-weight:bold;">${t.side}</td>
+            <td>${entryPrice}</td>
+            <td><span style="color:#f85149;">${slPrice}</span> / <span style="color:#3fb950;">${tpPrice}</span></td>
+            <td style="font-size:11px; color:#8b949e;">${wsText}</td>
+            <td>${stateBadge}</td>
+            <td style="font-size:11px; color:#e3b341;">${exitReason}</td>
+          </tr>
+        `;
+      }).reverse().join("");
+    }
+  } catch (e) {
+    console.error("fetchTradeHistory error:", e);
+  }
+}
+
+function renderAuditReport(r) {
+  const out = document.getElementById("audit-output");
+  if (!out) return;
+
+  const scorePct = (r.compliance_score * 100).toFixed(1);
+  const scoreColor = r.compliance_score >= 0.8 ? '#3fb950' : (r.compliance_score >= 0.5 ? '#e3b341' : '#f85149');
+  const violationsCount = (r.rule_violations || []).length;
+
+  const critique = r.plan_critique || {};
+  const tradeEvals = r.trade_evaluations || [];
+  const lessons = r.lessons_learned || [];
+  const params = r.parameter_adjustments_suggested || {};
+
+  out.innerHTML = `
+    <div style="border-bottom:1px solid #30363d; padding-bottom:10px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+      <div>
+        <span style="font-size:14px; font-weight:bold; color:#58a6ff;">📊 KẾT QUẢ KIỂM TOÁN PHIÊN (${r.session_id || "SESSION"})</span>
+        <div style="color:#8b949e; font-size:11px; margin-top:2px;">Khung phương pháp: Lance Beggs YTC Price Action + AI Quantitative Review</div>
+      </div>
+      <div style="display:flex; gap:15px; align-items:center;">
+        <div style="background:#161b22; border:1px solid ${scoreColor}; border-radius:6px; padding:4px 12px; text-align:center;">
+          <div style="font-size:10px; color:#8b949e;">COMPLIANCE SCORE</div>
+          <div style="font-size:16px; font-weight:bold; color:${scoreColor};">${scorePct}%</div>
+        </div>
+        <div style="background:#161b22; border:1px solid ${violationsCount > 0 ? '#da3633' : '#30363d'}; border-radius:6px; padding:4px 12px; text-align:center;">
+          <div style="font-size:10px; color:#8b949e;">VIOLATIONS</div>
+          <div style="font-size:16px; font-weight:bold; color:${violationsCount > 0 ? '#f85149' : '#8b949e'};">${violationsCount}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1. ĐÁNH GIÁ CÁCH TÍNH PLAN -->
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 12px; margin-bottom:12px;">
+      <div style="font-weight:bold; color:#f0883e; margin-bottom:6px; font-size:12px;">🎯 1. ĐÁNH GIÁ CÁCH TÍNH TRADING PLAN (PLAN CRITIQUE)</div>
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:8px; font-size:11px;">
+        <div style="background:#0d1117; padding:8px; border-radius:4px; border-left:3px solid #58a6ff;">
+          <div style="color:#8b949e;">Nhận định Market Regime:</div>
+          <div style="color:#c9d1d9; margin-top:2px;">${critique.regime_accuracy || "Đã phân tích tương thích cấu trúc thị trường."}</div>
+        </div>
+        <div style="background:#0d1117; padding:8px; border-radius:4px; border-left:3px solid #bc8cff;">
+          <div style="color:#8b949e;">Đánh giá Vùng HTF S/R:</div>
+          <div style="color:#c9d1d9; margin-top:2px;">${critique.sr_zones_evaluation || "Các vùng cản H1/M30 phát huy vai trò làm mốc đối chiếu."}</div>
+        </div>
+        <div style="background:#0d1117; padding:8px; border-radius:4px; border-left:3px solid #e3b341;">
+          <div style="color:#8b949e;">Bộ tính Giá sỉ Wholesale (LWP/LRP):</div>
+          <div style="color:#c9d1d9; margin-top:2px;">${critique.wholesale_engine_assessment || "Tỷ lệ R:R và biên độ giá sỉ được kiểm soát."}</div>
+        </div>
+      </div>
+      ${critique.summary ? `<div style="margin-top:8px; color:#8b949e; font-size:11px; font-style:italic;">"${critique.summary}"</div>` : ''}
+    </div>
+
+    <!-- 2. ĐÁNH GIÁ TỪNG LỆNH THEO HOÀN CẢNH VÀO -->
+    ${tradeEvals.length > 0 ? `
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 12px; margin-bottom:12px;">
+      <div style="font-weight:bold; color:#58a6ff; margin-bottom:6px; font-size:12px;">📝 2. ĐÁNH GIÁ TỪNG LỆNH THEO HOÀN CẢNH VÀO (TRADE EVALUATIONS)</div>
+      <div style="display:flex; flex-direction:column; gap:6px; max-height:220px; overflow-y:auto;">
+        ${tradeEvals.map(te => {
+          const badgeColor = te.score >= 0.8 ? '#3fb950' : (te.score >= 0.5 ? '#e3b341' : '#f85149');
+          return `
+            <div style="background:#0d1117; border:1px solid #21262d; border-radius:4px; padding:6px 10px; font-size:11px; display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div>
+                <strong>${te.setup || 'TRADE'}</strong> <code style="color:#8b949e;">${te.trade_id}</code> |
+                Side: <span style="color:${te.side==='BUY'?'#3fb950':'#f85149'}; font-weight:bold;">${te.side}</span> |
+                Giá vào: <strong>${te.entry_price || '--'}</strong> |
+                Trạng thái: <span style="color:#bc8cff;">${te.state || '--'}</span>
+                <div style="color:#8b949e; margin-top:2px;">${te.critique || te.notes || ''}</div>
+              </div>
+              <div style="background:#161b22; border:1px solid ${badgeColor}; color:${badgeColor}; font-weight:bold; padding:2px 8px; border-radius:4px; white-space:nowrap;">
+                ${(te.score * 100).toFixed(0)}%
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+    ` : ''}
+
+    <!-- 3. KHUYẾN NGHỊ THAM SỐ -->
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 12px; margin-bottom:12px;">
+      <div style="font-weight:bold; color:#d29922; margin-bottom:6px; font-size:12px;">⚙️ 3. ĐỀ XUẤT ĐIỀU CHỈNH THAM SỐ CHO PHIÊN TỚI (PARAMETER ADJUSTMENTS)</div>
+      <div style="display:flex; gap:15px; font-size:11px; flex-wrap:wrap;">
+        ${Object.entries(params).map(([k, v]) => `
+          <div style="background:#0d1117; padding:4px 10px; border-radius:4px; border:1px solid #30363d;">
+            <code style="color:#79c0ff;">${k}</code>: <strong style="color:#e3b341;">${v}</strong>
+          </div>
+        `).join("") || '<div style="color:#8b949e;">Duy trì tham số mặc định hiện tại.</div>'}
+      </div>
+    </div>
+
+    <!-- 4. BÀI HỌC KINH NGHIỆM ĐÃ NẠP VÀO VECTOR RAG -->
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 12px;">
+      <div style="font-weight:bold; color:#3fb950; margin-bottom:6px; font-size:12px;">🧠 4. BÀI HỌC KINH NGHIỆM ĐÃ NẠP VÀO VECTOR RAG (LESSONS LEARNED)</div>
+      <ul style="margin:0; padding-left:18px; font-size:11px; color:#c9d1d9;">
+        ${lessons.map(l => `<li style="margin-bottom:4px;">${l}</li>`).join("")}
+      </ul>
+    </div>
+    ${r.raw_ai_analysis ? `<div style="margin-top:10px; color:#8b949e; font-size:11px; border-top:1px solid #21262d; padding-top:6px;"><strong>Tóm tắt AI:</strong> ${r.raw_ai_analysis}</div>` : ''}
+  `;
+}
+
 async function runHindsightAudit() {
   const out = document.getElementById("audit-output");
-  out.innerHTML = "Auditing session against Lance Beggs YTC framework...";
+  out.innerHTML = `<div style="padding:15px; text-align:center; color:#58a6ff;">⏳ Đang thu thập nhật ký giao dịch và gửi yêu cầu kiểm toán tới AI (Lance Beggs YTC Engine)...</div>`;
 
   try {
     const symbol = document.getElementById("stat-symbol").textContent || "XAUUSD";
+
+    // 1. Fetch real closed trades and active trades from Server A
+    let tradesHistory = [];
+    try {
+      const histRes = await fetch(`${SERVER_A_URL}/api/trades/history`);
+      if (histRes.ok) {
+        const hData = await histRes.json();
+        tradesHistory = hData.closed_trades || [];
+      }
+    } catch (e) {
+      console.warn("Could not fetch trade history from Server A:", e);
+    }
+
+    // 2. Fetch current session config from Server A or plan textarea
+    let tradingConfig = null;
+    const planArea = document.getElementById("ai-plan-json");
+    const planText = planArea ? planArea.value : "";
+    if (planText && planText.trim().startsWith("{")) {
+      try {
+        tradingConfig = JSON.parse(planText);
+      } catch (e) {}
+    }
+
+    if (!tradingConfig) {
+      tradingConfig = {
+        session_id: `sess_${symbol}_${new Date().toISOString().slice(0, 10)}`,
+        symbol: symbol,
+        market_regime: document.getElementById("stat-regime") ? document.getElementById("stat-regime").textContent : "SIDEWAYS_RANGE",
+        setups_enabled: { "TST": true, "BOF": true, "BPB": false, "PB": true, "CPB": true }
+      };
+    }
+
+    // 3. Fetch latest bars for context
+    let recentBars = {};
+    try {
+      const bRes = await fetch(`${SERVER_A_URL}/api/bars?timeframe=M3&count=10`);
+      if (bRes.ok) recentBars["M3"] = await bRes.json();
+    } catch (e) {}
+
+    // 4. Send comprehensive audit payload to Server B
     const res = await fetch(`${SERVER_B_URL}/api/audit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        trading_config: { session_id: "sess_curr", symbol: symbol, market_regime: "SIDEWAYS_RANGE" },
-        session_trades: [],
-        full_session_ohlcv: {}
+        trading_config: tradingConfig,
+        session_trades: tradesHistory,
+        full_session_ohlcv: recentBars
       })
     });
+
     if (res.ok) {
       const data = await res.json();
-      const r = data.audit_report;
-      out.innerHTML = `
-        <div style="margin-bottom:8px;"><strong>Compliance Score:</strong> ${(r.compliance_score * 100).toFixed(1)}%</div>
-        <div style="margin-bottom:8px;"><strong>Violations:</strong> ${r.rule_violations.length}</div>
-        <div style="margin-bottom:8px;"><strong>Lessons Recorded (ChromaDB):</strong></div>
-        <ul style="padding-left:16px;">
-          ${r.lessons_learned.map(l => `<li>${l}</li>`).join("")}
-        </ul>
-      `;
+      renderAuditReport(data.audit_report);
+    } else {
+      const err = await res.json();
+      out.innerHTML = `<div style="color:#f85149; padding:12px;">❌ Lỗi khi thực hiện Audit từ Server B: ${err.detail || "Không rõ nguyên nhân"}</div>`;
     }
   } catch (e) {
-    out.innerHTML = `Error running audit: ${e.message}`;
+    out.innerHTML = `<div style="color:#f85149; padding:12px;">❌ Lỗi kết nối tới Server B: ${e.message}</div>`;
+  }
+}
+
+async function loadLatestAudit() {
+  const out = document.getElementById("audit-output");
+  out.innerHTML = `<div style="padding:15px; text-align:center; color:#8b949e;">Đang nạp báo cáo audit gần nhất...</div>`;
+
+  try {
+    const res = await fetch(`${SERVER_B_URL}/api/audit/latest`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "SUCCESS" && data.audit_report) {
+        renderAuditReport(data.audit_report);
+      } else {
+        out.innerHTML = `<div style="color:#8b949e; text-align:center; padding:20px;">Chưa có báo cáo audit nào được lưu trên hệ thống.</div>`;
+      }
+    } else {
+      out.innerHTML = `<div style="color:#f85149; padding:12px;">Không thể tải báo cáo audit gần nhất.</div>`;
+    }
+  } catch (e) {
+    out.innerHTML = `<div style="color:#f85149; padding:12px;">Lỗi kết nối tới Server B: ${e.message}</div>`;
   }
 }
 
@@ -821,11 +1052,34 @@ async function loadRiskConfig() {
       const riskPctInput = document.getElementById("cfg-risk-pct-input");
       const slInput = document.getElementById("cfg-sl-input");
       const tpInput = document.getElementById("cfg-tp-input");
+      const aiPreEntryCheck = document.getElementById("cfg-ai-pre-entry-input");
+      const aiConfInput = document.getElementById("cfg-ai-confidence-input");
+      const aiBadge = document.getElementById("ai-gatekeeper-badge");
 
       if (volInput && data.fixed_lot_size) volInput.value = data.fixed_lot_size;
       if (riskPctInput && data.account_risk_limit_percent) riskPctInput.value = data.account_risk_limit_percent;
       if (slInput && data.manual_sl) slInput.value = data.manual_sl;
       if (tpInput && data.manual_tp1) tpInput.value = data.manual_tp1;
+
+      if (aiPreEntryCheck && data.enable_ai_pre_entry !== undefined) {
+        aiPreEntryCheck.checked = Boolean(data.enable_ai_pre_entry);
+      }
+      if (aiConfInput && data.min_ai_confidence !== undefined) {
+        aiConfInput.value = data.min_ai_confidence;
+      }
+      if (aiBadge) {
+        if (data.enable_ai_pre_entry) {
+          aiBadge.textContent = "AI ACTIVE";
+          aiBadge.style.background = "#0f2d1e";
+          aiBadge.style.color = "#3fb950";
+          aiBadge.style.borderColor = "#238636";
+        } else {
+          aiBadge.textContent = "AI OFF";
+          aiBadge.style.background = "#21262d";
+          aiBadge.style.color = "#8b949e";
+          aiBadge.style.borderColor = "#30363d";
+        }
+      }
 
       if (badge) {
         if (data.fixed_lot_size || data.manual_sl || data.manual_tp1) {
@@ -868,12 +1122,16 @@ async function saveRiskConfig() {
     const riskPct = parseFloat(document.getElementById("cfg-risk-pct-input").value) || null;
     const sl = parseFloat(document.getElementById("cfg-sl-input").value) || null;
     const tp = parseFloat(document.getElementById("cfg-tp-input").value) || null;
+    const aiPreEntry = document.getElementById("cfg-ai-pre-entry-input") ? document.getElementById("cfg-ai-pre-entry-input").checked : true;
+    const minAiConf = parseFloat(document.getElementById("cfg-ai-confidence-input") ? document.getElementById("cfg-ai-confidence-input").value : 0.65) || 0.65;
 
     const payload = {
       fixed_lot_size: vol,
       account_risk_limit_percent: riskPct,
       manual_sl: sl,
-      manual_tp1: tp
+      manual_tp1: tp,
+      enable_ai_pre_entry: aiPreEntry,
+      min_ai_confidence: minAiConf
     };
 
     const res = await fetch(`${SERVER_A_URL}/api/risk_config`, {
@@ -883,7 +1141,7 @@ async function saveRiskConfig() {
     });
 
     if (res.ok) {
-      alert("✅ Đã lưu cấu hình Khối lượng & SL/TP thành công!");
+      alert("✅ Đã lưu cấu hình Khối lượng, SL/TP & AI Gatekeeper thành công!");
       loadRiskConfig();
     } else {
       alert("❌ Lỗi khi lưu cấu hình rủi ro.");
@@ -900,7 +1158,9 @@ async function resetRiskConfigToAuto() {
       account_risk_limit_percent: 1.0,
       manual_sl: 0,
       manual_tp1: 0,
-      manual_tp2: 0
+      manual_tp2: 0,
+      enable_ai_pre_entry: true,
+      min_ai_confidence: 0.65
     };
 
     const res = await fetch(`${SERVER_A_URL}/api/risk_config`, {
@@ -914,8 +1174,10 @@ async function resetRiskConfigToAuto() {
       document.getElementById("cfg-risk-pct-input").value = "1.0";
       document.getElementById("cfg-sl-input").value = "";
       document.getElementById("cfg-tp-input").value = "";
+      if (document.getElementById("cfg-ai-pre-entry-input")) document.getElementById("cfg-ai-pre-entry-input").checked = true;
+      if (document.getElementById("cfg-ai-confidence-input")) document.getElementById("cfg-ai-confidence-input").value = "0.65";
       loadRiskConfig();
-      alert("🔄 Đã đặt lại cấu hình Khối lượng và SL/TP về chế độ Gợi ý Tự động!");
+      alert("🔄 Đã đặt lại cấu hình Khối lượng, SL/TP & AI Gatekeeper về chế độ Gợi ý Tự động!");
     }
   } catch (e) {
     alert(`Lỗi: ${e.message}`);
@@ -1105,12 +1367,14 @@ window.addEventListener("DOMContentLoaded", () => {
   connectWebSocket();
   fetchStatus();
   fetchPositions();
+  fetchTradeHistory();
   fetchRadarFallback();
   loadAIConfig();
   loadRiskConfig();
   setInterval(() => {
     fetchStatus();
     fetchPositions();
+    fetchTradeHistory();
     fetchLatestBarsFallback();
     fetchRadarFallback();
   }, 1500);

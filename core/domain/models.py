@@ -142,6 +142,8 @@ class TradeLifecycle:
     anchor_id: Optional[str] = None
     close_time: Optional[float] = None
     spatial_anchor_key: Optional[str] = None
+    entry_context: Optional[Dict[str, Any]] = None
+    close_context: Optional[Dict[str, Any]] = None
 
 @dataclass
 class SessionConfig:
@@ -161,10 +163,23 @@ class SessionConfig:
 class AuditReport:
     session_id: str
     compliance_score: float
-    rule_violations: List[Dict[str, Any]]
-    hindsight_optimal_trades: List[Dict[str, Any]]
-    lessons_learned: List[str]
-    parameter_adjustments_suggested: Dict[str, Any]
+    rule_violations: List[Dict[str, Any]] = field(default_factory=list)
+    hindsight_optimal_trades: List[Dict[str, Any]] = field(default_factory=list)
+    lessons_learned: List[str] = field(default_factory=list)
+    parameter_adjustments_suggested: Dict[str, Any] = field(default_factory=dict)
+    plan_critique: Optional[Dict[str, Any]] = None
+    trade_evaluations: List[Dict[str, Any]] = field(default_factory=list)
+    raw_ai_analysis: str = ""
+
+@dataclass
+class PreEntryEvaluation:
+    approved: bool
+    confidence: float
+    reason: str
+    concerns: List[str] = field(default_factory=list)
+    suggested_modifications: Dict[str, Any] = field(default_factory=dict)
+    evaluated_at: str = ""
+    model_name: str = ""
 
 @dataclass
 class InstrumentProfile:

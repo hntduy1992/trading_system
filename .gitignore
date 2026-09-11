@@ -21,3 +21,4 @@ data/*.json
 !data/.gitkeep
 logs/
 *.log
+data/trading_config.json

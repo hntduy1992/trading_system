@@ -3,7 +3,7 @@ AI Engine Interface (Port) - Abstract base for LLM reasoning (Gemini, Claude, Op
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List
-from core.domain.models import SessionConfig, AuditReport
+from core.domain.models import SessionConfig, AuditReport, PreEntryEvaluation
 
 class IAIEngine(ABC):
     @abstractmethod
@@ -16,6 +16,16 @@ class IAIEngine(ABC):
         retrieved_rag_lessons: List[str]
     ) -> SessionConfig:
         """Execute Pre-Session AI Planning Prompt and return validated SessionConfig."""
+        pass
+
+    @abstractmethod
+    async def evaluate_candidate_trade(
+        self,
+        candidate_context: Dict[str, Any],
+        trading_config: Dict[str, Any],
+        recent_bars: Dict[str, Any]
+    ) -> PreEntryEvaluation:
+        """Evaluate a candidate entry setup before dispatching order to broker."""
         pass
 
     @abstractmethod

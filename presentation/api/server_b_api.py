@@ -40,7 +40,8 @@ def create_server_b_app(
     auditor: HindsightAuditorUseCase,
     vector_store: IVectorStore,
     json_store: LocalJsonStore,
-    active_env_file: Optional[str] = None
+    active_env_file: Optional[str] = None,
+    evaluate_entry: Optional[Any] = None
 ) -> FastAPI:
     app = FastAPI(title="Server B - AI Evaluation & Planning Studio", version="2.1.0-STRICT")
     from config import ACTIVE_ENV_FILE
@@ -69,7 +70,7 @@ def create_server_b_app(
             "port": 29121,
             "status": "RUNNING",
             "ai_config": current_ai,
-            "capabilities": ["PreSessionPlanning", "PostSessionHindsightAudit", "VectorRAG", "DynamicOptimization"]
+            "capabilities": ["PreSessionPlanning", "PostSessionHindsightAudit", "VectorRAG", "DynamicOptimization", "PreEntryValidation"]
         }
 
     @app.get("/api/ai_config")
@@ -110,6 +111,8 @@ def create_server_b_app(
             new_engine = GeminiAIAdapter(api_key=key or os.getenv("GEMINI_API_KEY", ""), model_name=model or "gemini-2.0-flash")
             planner.ai_engine = new_engine
             auditor.ai_engine = new_engine
+            if evaluate_entry:
+                evaluate_entry.ai_engine = new_engine
             current_ai["provider"] = "gemini"
             current_ai["model_name"] = model or "gemini-2.0-flash"
             current_ai["has_gemini_key"] = bool(key or os.getenv("GEMINI_API_KEY", ""))
@@ -122,6 +125,8 @@ def create_server_b_app(
             new_engine = OpenAIAdapter(api_key=key or os.getenv("OPENAI_API_KEY", ""), model_name=model or "gpt-4o")
             planner.ai_engine = new_engine
             auditor.ai_engine = new_engine
+            if evaluate_entry:
+                evaluate_entry.ai_engine = new_engine
             current_ai["provider"] = "openai"
             current_ai["model_name"] = model or "gpt-4o"
             current_ai["has_openai_key"] = bool(key or os.getenv("OPENAI_API_KEY", ""))
@@ -278,12 +283,37 @@ def create_server_b_app(
                 session_trades_json=req.session_trades,
                 full_session_ohlcv=req.full_session_ohlcv
             )
+            report_dict = report.__dict__
+            if json_store:
+                try:
+                    import os
+                    import json
+                    filepath = os.path.join(json_store.data_dir, "last_audit_report.json")
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(report_dict, f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    print(f"[Server B] Could not save last_audit_report.json: {e}")
+
             return {
                 "status": "SUCCESS",
-                "audit_report": report.__dict__
+                "audit_report": report_dict
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/audit/latest")
+    async def get_latest_audit():
+        if json_store:
+            try:
+                import os
+                import json
+                filepath = os.path.join(json_store.data_dir, "last_audit_report.json")
+                if os.path.exists(filepath):
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        return {"status": "SUCCESS", "audit_report": json.load(f)}
+            except Exception as e:
+                pass
+        return {"status": "EMPTY", "message": "Chưa có báo cáo audit nào được lưu."}
 
     @app.get("/api/rag/lessons")
     async def get_lessons(query: str = "general", regime: str = "GENERAL", limit: int = 5):

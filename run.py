@@ -93,7 +93,7 @@ class SystemOrchestrator:
         # 2. Dependency Injection: Use Cases
         from core.domain.rules.session_manager import SessionManager
         self.session_manager = SessionManager(enabled=True)
-        self.evaluate_entry = EvaluateEntryUseCase(self.broker, self.event_bus)
+        self.evaluate_entry = EvaluateEntryUseCase(self.broker, self.event_bus, ai_engine=self.ai_engine)
         self.evaluate_entry.session_manager = self.session_manager
         self.manage_lifecycle = ManageLifecycleUseCase(self.broker, self.event_bus)
         self.circuit_breaker = CircuitBreakerUseCase(self.broker, self.event_bus)
@@ -105,7 +105,8 @@ class SystemOrchestrator:
             broker=self.broker,
             event_bus=self.event_bus,
             circuit_breaker=self.circuit_breaker,
-            state_ref=self.state
+            state_ref=self.state,
+            json_store=self.json_store
         )
 
         self.server_b_app = create_server_b_app(
@@ -113,7 +114,8 @@ class SystemOrchestrator:
             auditor=self.auditor,
             vector_store=self.vector_store,
             json_store=self.json_store,
-            active_env_file=self.active_env_file
+            active_env_file=self.active_env_file,
+            evaluate_entry=self.evaluate_entry
         )
 
     async def _trigger_async_replan(self, session_cfg: SessionConfig, reason: str):
@@ -225,6 +227,17 @@ class SystemOrchestrator:
                         if trade in active_trades:
                             active_trades.remove(trade)
                         self.state["closed_trades"].append(trade)
+                        try:
+                            from presentation.api.server_a_api import serialize_trade
+                            serialized_closed = [serialize_trade(t) for t in self.state["closed_trades"]]
+                            self.json_store.save_session_trades(serialized_closed)
+                        except Exception as ex:
+                            print(f"[ENGINE] Failed to persist closed trades: {ex}")
+                        await self.event_bus.publish("trade_closed", {
+                            "trade_id": trade.trade_id,
+                            "state": trade.state.value,
+                            "close_context": getattr(trade, "close_context", {})
+                        })
                         print(f"[ENGINE] Trade Finalized: {trade.trade_id} [{trade.state.value}]. Post-Trade Cooldown Active.")
 
                 # 3. Zone Monitor & S/R Role Reversal (Tier 1 Local Reflex & Tier 2 AI Trigger)

@@ -3,9 +3,10 @@ Evaluate Entry Use Case (Server A Execution Engine)
 """
 from typing import Dict, Any, List, Optional
 import time
+import asyncio
 from core.domain.models import (
     Bar, SwingNode, SessionConfig, OrderSide, SetupType, 
-    WholesaleCalculation, TradeLifecycle, PositionPart, PositionState
+    WholesaleCalculation, TradeLifecycle, PositionPart, PositionState, PreEntryEvaluation
 )
 from core.domain.rules.swing_detector import SwingDetector
 from core.domain.rules.vector_dynamics import MicroPatternDetector, VectorDynamicsCalculator
@@ -16,9 +17,10 @@ from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
 
 class EvaluateEntryUseCase:
-    def __init__(self, broker: IBrokerGateway, event_bus: IEventBus):
+    def __init__(self, broker: IBrokerGateway, event_bus: IEventBus, ai_engine: Optional[Any] = None):
         self.broker = broker
         self.event_bus = event_bus
+        self.ai_engine = ai_engine
         self.setups = {
             "TST": TSTSetup(),
             "BOF": BOFSetup(),
@@ -262,6 +264,94 @@ class EvaluateEntryUseCase:
                 if side == OrderSide.SELL and current_price >= actual_sl:
                     continue
 
+                # 8. Pre-Entry AI Validation Gatekeeper
+                enable_ai_pre_entry = exec_rules.get("enable_ai_pre_entry", risk_mgmt.get("enable_ai_pre_entry", True))
+                min_ai_confidence = float(exec_rules.get("min_ai_confidence", risk_mgmt.get("min_ai_confidence", 0.65)))
+                ai_eval = None
+
+                if enable_ai_pre_entry and self.ai_engine:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "AI_PRE_ENTRY_EVALUATING",
+                        "setup": setup_name,
+                        "side": side.value,
+                        "price": order_price,
+                        "message": f"🤖 AI đang đánh giá điểm vào {setup_name} {side.value} tại {order_price}..."
+                    })
+
+                    candidate_ctx = {
+                        "symbol": config.symbol,
+                        "setup": setup_name,
+                        "side": side.value,
+                        "order_type": order_type,
+                        "order_price": order_price,
+                        "sl": actual_sl,
+                        "tp1": actual_tp1,
+                        "tp2": actual_tp2,
+                        "wholesale": wholesale.__dict__,
+                        "stall_range": {"low": stall_low, "high": stall_high},
+                        "nearest_zones": [
+                            {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low}
+                            for z in (config.resistance_zones + config.support_zones)
+                        ]
+                    }
+
+                    trading_cfg_dict = {
+                        "symbol": config.symbol,
+                        "market_regime": config.market_regime.value,
+                        "setups_enabled": config.setups_enabled
+                    }
+
+                    recent_snapshot = {
+                        "m1_last_5": [{"time": int(b.timestamp), "open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m1[-5:] if len(bars_m1)>=5 else bars_m1)],
+                        "m3_last_3": [{"time": int(b.timestamp), "open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m3[-3:] if len(bars_m3)>=3 else bars_m3)]
+                    }
+
+                    try:
+                        ai_eval = await asyncio.wait_for(
+                            self.ai_engine.evaluate_candidate_trade(candidate_ctx, trading_cfg_dict, recent_snapshot),
+                            timeout=4.0
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"[ENGINE] AI Pre-entry evaluation timed out (>4.0s) for {setup_name}.")
+                        fallback_policy = exec_rules.get("ai_timeout_policy", "ALLOW")
+                        if fallback_policy == "REJECT":
+                            await self.event_bus.publish("telemetry", {
+                                "type": "AI_ENTRY_VETOED",
+                                "setup": setup_name,
+                                "side": side.value,
+                                "price": order_price,
+                                "message": f"🚫 Điểm vào {setup_name} {side.value} bị hủy do AI phản hồi quá thời gian cho phép (>4s)."
+                            })
+                            continue
+                    except Exception as e:
+                        print(f"[ENGINE] AI Pre-entry evaluation error: {e}")
+
+                    if ai_eval:
+                        if not ai_eval.approved or ai_eval.confidence < min_ai_confidence:
+                            await self.event_bus.publish("telemetry", {
+                                "type": "AI_ENTRY_VETOED",
+                                "setup": setup_name,
+                                "side": side.value,
+                                "price": order_price,
+                                "confidence": ai_eval.confidence,
+                                "reason": ai_eval.reason,
+                                "concerns": ai_eval.concerns,
+                                "message": f"🚫 AI TỪ CHỐI điểm vào {setup_name} {side.value}! Lý do: {ai_eval.reason} (Độ tin cậy: {ai_eval.confidence*100:.0f}%)"
+                            })
+                            print(f"[AI_GATEKEEPER] VETOED entry {setup_name} {side.value} at {order_price}: {ai_eval.reason}")
+                            continue
+                        else:
+                            await self.event_bus.publish("telemetry", {
+                                "type": "AI_ENTRY_APPROVED",
+                                "setup": setup_name,
+                                "side": side.value,
+                                "price": order_price,
+                                "confidence": ai_eval.confidence,
+                                "reason": ai_eval.reason,
+                                "message": f"✅ AI PHÊ DUYỆT điểm vào {setup_name} {side.value}! (Độ tin cậy: {ai_eval.confidence*100:.0f}%) - {ai_eval.reason}"
+                            })
+                            print(f"[AI_GATEKEEPER] APPROVED entry {setup_name} {side.value} at {order_price} ({ai_eval.confidence*100:.0f}%): {ai_eval.reason}")
+
                 # Send order to Broker (Live MT5 or Paper)
                 order_ticket = await self.broker.place_order(
                     symbol=config.symbol,
@@ -287,6 +377,38 @@ class EvaluateEntryUseCase:
                 self.consumed_anchors.add(anchor_id)
                 self.total_session_trades += 1
 
+                entry_context = {
+                    "symbol": config.symbol,
+                    "session_id": config.session_id,
+                    "session_tag": config.session_tag,
+                    "market_regime": config.market_regime.value,
+                    "trend": trend.value if hasattr(trend, "value") else str(trend),
+                    "setup": setup_name,
+                    "side": side.value,
+                    "order_type": order_type,
+                    "order_price": order_price,
+                    "sl": actual_sl,
+                    "tp1": actual_tp1,
+                    "tp2": actual_tp2,
+                    "wholesale": wholesale.__dict__,
+                    "stall_range": {"low": stall_low, "high": stall_high},
+                    "nearest_zones": [
+                        {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low, "significance": z.significance.value if hasattr(z.significance, "value") else str(z.significance)}
+                        for z in (config.resistance_zones + config.support_zones)
+                    ],
+                    "total_volume": lot_total,
+                    "lots": {"total": lot_total, "p1": lot_p1, "p2": lot_p2},
+                    "risk_percent": risk_limit,
+                    "timestamp": time.time(),
+                    "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "ai_pre_evaluation": {
+                        "approved": ai_eval.approved,
+                        "confidence": ai_eval.confidence,
+                        "reason": ai_eval.reason,
+                        "model_name": ai_eval.model_name
+                    } if ai_eval else None
+                }
+
                 initial_state = PositionState.IN_POSITION if order_type == "MARKET" else PositionState.PENDING_ENTRY
 
                 lifecycle = TradeLifecycle(
@@ -303,7 +425,8 @@ class EvaluateEntryUseCase:
                     m1_bars_in_trade=0,
                     last_bar_timestamp=bars_m1[-1].timestamp if bars_m1 else None,
                     anchor_id=anchor_id,
-                    spatial_anchor_key=spatial_anchor_key
+                    spatial_anchor_key=spatial_anchor_key,
+                    entry_context=entry_context
                 )
 
                 await self.event_bus.publish("trade_opened", {
