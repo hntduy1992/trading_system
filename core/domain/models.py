@@ -195,6 +195,8 @@ class InstrumentProfile:
     default_t1_points: float   # Fallback T1 distance
     default_t2_points: float   # Fallback T2 distance
     slippage_tolerance_pips: float
+    min_sl_points: float = 2.50       # Sàn dừng lỗ tối thiểu an toàn để tránh bị quét bởi spread
+    max_spread_points: float = 0.45   # Ngưỡng trần spread tối đa cho phép vào lệnh
 
 def get_instrument_profile(symbol: str) -> InstrumentProfile:
     sym = symbol.upper()
@@ -211,7 +213,9 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
             sr_proximity_points=1.50,  # $1.50 zone proximity
             default_t1_points=5.00,    # $5.00 target 1
             default_t2_points=15.00,   # $15.00 target 2
-            slippage_tolerance_pips=0.50
+            slippage_tolerance_pips=0.50,
+            min_sl_points=2.50,        # Minimum 2.50 USD SL floor on Gold
+            max_spread_points=0.45     # Maximum 0.45 USD spread allowed
         )
     elif "BTC" in sym:
         return InstrumentProfile(
@@ -226,7 +230,9 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
             sr_proximity_points=100.00,
             default_t1_points=300.00,
             default_t2_points=800.00,
-            slippage_tolerance_pips=10.0
+            slippage_tolerance_pips=10.0,
+            min_sl_points=150.00,
+            max_spread_points=25.00
         )
     else:
         # Default Forex 5-digit (EURUSD, GBPUSD, etc.)
@@ -242,6 +248,8 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
             sr_proximity_points=0.00050, # 5 pips
             default_t1_points=0.00200, # 20 pips
             default_t2_points=0.00500, # 50 pips
-            slippage_tolerance_pips=1.0
+            slippage_tolerance_pips=1.0,
+            min_sl_points=0.00150,     # 15 pips min SL
+            max_spread_points=0.00030  # 3 pips max spread
         )
 

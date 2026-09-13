@@ -109,31 +109,33 @@ class TSTSetup(BaseSetup):
         prox, t1_dist, t2_dist = _calc_thresholds(bars_1m, profile)
         atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
 
-        # Check Test of Support -> BUY
-        for sup in support_zones:
-            if sup.contains(curr_price) or abs(curr_price - sup.high) <= prox:
-                if _is_post_expansion_exhausted(bars_1m, OrderSide.BUY, atr):
-                    continue
-                if not _is_tst_reaction(bars_1m, OrderSide.BUY, atr):
-                    continue
-                recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
-                t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
-                t2 = resistance_zones[0].low if resistance_zones else (curr_price + t2_dist)
-                pullback_swing = sup.low
-                return True, OrderSide.BUY, pullback_swing, t1, t2
+        # Check Test of Support -> BUY (Only allowed if not in strong downtrend)
+        if "DOWN" not in trend.upper():
+            for sup in support_zones:
+                if sup.contains(curr_price) or abs(curr_price - sup.high) <= prox:
+                    if _is_post_expansion_exhausted(bars_1m, OrderSide.BUY, atr):
+                        continue
+                    if not _is_tst_reaction(bars_1m, OrderSide.BUY, atr):
+                        continue
+                    recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
+                    t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
+                    t2 = resistance_zones[0].low if resistance_zones else (curr_price + t2_dist)
+                    pullback_swing = sup.low
+                    return True, OrderSide.BUY, pullback_swing, t1, t2
 
-        # Check Test of Resistance -> SELL
-        for res in resistance_zones:
-            if res.contains(curr_price) or abs(curr_price - res.low) <= prox:
-                if _is_post_expansion_exhausted(bars_1m, OrderSide.SELL, atr):
-                    continue
-                if not _is_tst_reaction(bars_1m, OrderSide.SELL, atr):
-                    continue
-                recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
-                t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
-                t2 = support_zones[0].high if support_zones else (curr_price - t2_dist)
-                pullback_swing = res.high
-                return True, OrderSide.SELL, pullback_swing, t1, t2
+        # Check Test of Resistance -> SELL (Only allowed if not in strong uptrend)
+        if "UP" not in trend.upper():
+            for res in resistance_zones:
+                if res.contains(curr_price) or abs(curr_price - res.low) <= prox:
+                    if _is_post_expansion_exhausted(bars_1m, OrderSide.SELL, atr):
+                        continue
+                    if not _is_tst_reaction(bars_1m, OrderSide.SELL, atr):
+                        continue
+                    recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
+                    t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
+                    t2 = support_zones[0].high if support_zones else (curr_price - t2_dist)
+                    pullback_swing = res.high
+                    return True, OrderSide.SELL, pullback_swing, t1, t2
 
         return False, None, None, None, None
 
@@ -158,21 +160,23 @@ class BOFSetup(BaseSetup):
         curr_bar = bars_1m[-1]
         _, t1_dist, t2_dist = _calc_thresholds(bars_1m, profile)
 
-        # Check Spring at Support -> BUY
-        for sup in support_zones:
-            if MicroPatternDetector.detect_spring(curr_bar, sup.low):
-                recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
-                t1 = recent_sh[-1].price if recent_sh else (curr_bar.close + t1_dist)
-                t2 = resistance_zones[0].low if resistance_zones else (curr_bar.close + t2_dist)
-                return True, OrderSide.BUY, curr_bar.low, t1, t2
+        # Check Spring at Support -> BUY (Only allowed if not in strong downtrend)
+        if "DOWN" not in trend.upper():
+            for sup in support_zones:
+                if MicroPatternDetector.detect_spring(curr_bar, sup.low):
+                    recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
+                    t1 = recent_sh[-1].price if recent_sh else (curr_bar.close + t1_dist)
+                    t2 = resistance_zones[0].low if resistance_zones else (curr_bar.close + t2_dist)
+                    return True, OrderSide.BUY, curr_bar.low, t1, t2
 
-        # Check Upthrust at Resistance -> SELL
-        for res in resistance_zones:
-            if MicroPatternDetector.detect_upthrust(curr_bar, res.high):
-                recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
-                t1 = recent_sl[-1].price if recent_sl else (curr_bar.close - t1_dist)
-                t2 = support_zones[0].high if support_zones else (curr_bar.close - t2_dist)
-                return True, OrderSide.SELL, curr_bar.high, t1, t2
+        # Check Upthrust at Resistance -> SELL (Only allowed if not in strong uptrend)
+        if "UP" not in trend.upper():
+            for res in resistance_zones:
+                if MicroPatternDetector.detect_upthrust(curr_bar, res.high):
+                    recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
+                    t1 = recent_sl[-1].price if recent_sl else (curr_bar.close - t1_dist)
+                    t2 = support_zones[0].high if support_zones else (curr_bar.close - t2_dist)
+                    return True, OrderSide.SELL, curr_bar.high, t1, t2
 
         return False, None, None, None, None
 

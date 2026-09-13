@@ -12,6 +12,7 @@ from core.domain.rules.swing_detector import SwingDetector
 from core.domain.rules.vector_dynamics import MicroPatternDetector, VectorDynamicsCalculator
 from core.domain.rules.wholesale_engine import WholesaleEngine
 from core.domain.rules.risk_manager import RiskManager
+from core.domain.rules.setups.base import BaseSetup
 from core.domain.rules.setups.setups import TSTSetup, BOFSetup, BPBSetup, PBSetup, CPBSetup
 from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
@@ -29,7 +30,10 @@ class EvaluateEntryUseCase:
             "CPB": CPBSetup()
         }
         self.consumed_anchors: set = set()
+        self.stopped_out_anchors: set = set()
+        self.stopped_out_spatial_keys: set = set()
         self.last_trade_closed_time: float = 0.0
+        self.last_stopped_out_time: float = 0.0
         self.last_closed_state: Optional[PositionState] = None
         self.zone_scratch_history: Dict[str, List[float]] = {}
         self.consecutive_losses: int = 0
@@ -44,11 +48,16 @@ class EvaluateEntryUseCase:
         
         if is_loss:
             self.consecutive_losses += 1
+            self.last_stopped_out_time = self.last_trade_closed_time
+            if trade.anchor_id:
+                self.stopped_out_anchors.add(trade.anchor_id)
+            if getattr(trade, "spatial_anchor_key", None):
+                self.stopped_out_spatial_keys.add(trade.spatial_anchor_key)
         elif trade.state == PositionState.FULLY_CLOSED:
             self.consecutive_losses = 0
 
         # Track scratches per spatial price zone to prevent consolidation churn
-        if trade.state == PositionState.SCRATCHED and trade.spatial_anchor_key:
+        if trade.state == PositionState.SCRATCHED and getattr(trade, "spatial_anchor_key", None):
             now = self.last_trade_closed_time
             if trade.spatial_anchor_key not in self.zone_scratch_history:
                 self.zone_scratch_history[trade.spatial_anchor_key] = []
@@ -57,8 +66,11 @@ class EvaluateEntryUseCase:
     def reset_session(self):
         """Resets session tracking statistics."""
         self.consumed_anchors.clear()
+        self.stopped_out_anchors.clear()
+        self.stopped_out_spatial_keys.clear()
         self.zone_scratch_history.clear()
         self.last_trade_closed_time = 0.0
+        self.last_stopped_out_time = 0.0
         self.last_closed_state = None
         self.consecutive_losses = 0
         self.total_session_trades = 0
@@ -121,6 +133,18 @@ class EvaluateEntryUseCase:
         if self.last_trade_closed_time > 0 and (now - self.last_trade_closed_time) < cooldown_secs:
             return None
 
+        # 3a. News Blackout Window Filter (Freeze new entries around high-impact economic news)
+        news_filter = config.news_filter or {}
+        blackout_windows = news_filter.get("blackout_windows", [])
+        for bw in blackout_windows:
+            if bw.get("start_ts", 0) <= now <= bw.get("end_ts", 0):
+                event_title = bw.get("title", "High-Impact Economic Release")
+                await self.event_bus.publish("telemetry", {
+                    "type": "ENTRY_REJECTED",
+                    "reason": f"News Blackout Active: Tạm ngừng giao dịch trước/sau tin đỏ '{event_title}' ({bw.get('start_str')} -> {bw.get('end_str')})"
+                })
+                return None
+
         # 4. Capital Protection Constraint: Max Consecutive Losses Circuit Breaker
         max_consecutive_losses = risk_mgmt.get("max_consecutive_losses", 2)
         if self.consecutive_losses >= max_consecutive_losses:
@@ -143,6 +167,21 @@ class EvaluateEntryUseCase:
 
         from core.domain.models import get_instrument_profile
         profile = get_instrument_profile(config.symbol)
+
+        # Real-time Spread Filter (Blocks trades during news/illiquidity spread widening)
+        try:
+            sym_info = await self.broker.get_symbol_info(config.symbol)
+            if sym_info and "ask" in sym_info and "bid" in sym_info:
+                curr_spread = round(sym_info["ask"] - sym_info["bid"], profile.digits)
+                max_spread = exec_rules.get("max_spread_points", profile.max_spread_points)
+                if curr_spread > max_spread:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "ENTRY_REJECTED",
+                        "reason": f"Spread too high: {curr_spread} > {max_spread}. Protected from spread slippage."
+                    })
+                    return None
+        except Exception:
+            pass
 
         # 6. Detect 1m Stall Micro-structure (flexible fallback)
         is_stall, stall_low, stall_high = MicroPatternDetector.detect_stall(bars_m1, min_candles=3, atr_factor=1.5)
@@ -170,6 +209,38 @@ class EvaluateEntryUseCase:
             )
 
             if triggered and side and pullback_price and t1 and t2:
+                # 7a. Regime & Trend Gating Matrix (Anti-counter-trend protection)
+                is_compat, compat_msg = BaseSetup.is_setup_compatible(
+                    setup_type=SetupType(setup_name),
+                    side=side,
+                    market_regime=config.market_regime,
+                    trend=trend.value if hasattr(trend, "value") else str(trend)
+                )
+                if not is_compat:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SETUP_REJECTED",
+                        "setup": setup_name,
+                        "reason": compat_msg
+                    })
+                    continue
+
+                # 7b. Macro News Bias Filter (Avoid swimming against strong fundamental sentiment)
+                macro_bias = str(news_filter.get("macro_bias", "NEUTRAL")).upper()
+                if "BULLISH" in macro_bias and side == OrderSide.SELL:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SETUP_REJECTED",
+                        "setup": setup_name,
+                        "reason": f"Macro News Bias is {macro_bias}. Counter-macro SELL prohibited."
+                    })
+                    continue
+                elif "BEARISH" in macro_bias and side == OrderSide.BUY:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SETUP_REJECTED",
+                        "setup": setup_name,
+                        "reason": f"Macro News Bias is {macro_bias}. Counter-macro BUY prohibited."
+                    })
+                    continue
+
                 # Spatial Anchor Deduplication & Max Retries per Zone Check
                 spatial_anchor_key = f"{setup_name}_{side.value}_{round(pullback_price, 1)}"
                 max_retries = exec_rules.get("max_retries_per_zone", 2)
@@ -189,7 +260,20 @@ class EvaluateEntryUseCase:
                 if anchor_id in self.consumed_anchors:
                     # Anchor already traded! Prevents oscillating re-entries around entry price.
                     continue
-                # 5. Calculate Wholesale Levels (LWP, LRP, assertion)
+
+                # 8a. Anti-Revenge Lockout: Never re-enter an anchor or zone that was STOPPED_OUT
+                if anchor_id in self.stopped_out_anchors or spatial_anchor_key in self.stopped_out_spatial_keys:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SETUP_REJECTED",
+                        "setup": setup_name,
+                        "reason": f"Anchor {spatial_anchor_key} previously stopped out. Revenge trading prohibited."
+                    })
+                    continue
+
+                # 5. Calculate Wholesale Levels with Dynamic SL Floor (S1, LWP, LRP)
+                atr_1m = MicroPatternDetector.calculate_atr(bars_m1, period=14)
+                min_sl_dist = max(profile.min_sl_points, atr_1m * 1.8)
+
                 wholesale = WholesaleEngine.calculate_wholesale_levels(
                     setup_type=SetupType(setup_name),
                     side=side,
@@ -198,14 +282,15 @@ class EvaluateEntryUseCase:
                     t2_price=t2,
                     micro_stall_high=stall_high,
                     micro_stall_low=stall_low,
-                    buffer_pts=profile.min_buffer_points
+                    buffer_pts=profile.min_buffer_points,
+                    min_sl_distance=min_sl_dist
                 )
 
                 if not wholesale.is_valid_entry:
                     await self.event_bus.publish("telemetry", {
                         "type": "SETUP_REJECTED",
                         "setup": setup_name,
-                        "reason": f"Entry price {wholesale.recommended_entry} fails Wholesale / R:R >= 1.0 boundary"
+                        "reason": f"Entry price {wholesale.recommended_entry} fails Wholesale / R:R >= 1.0 boundary (Min SL Floor {min_sl_dist:.2f})"
                     })
                     continue
 
@@ -233,6 +318,20 @@ class EvaluateEntryUseCase:
                         point_size=profile.point,
                         tick_value=profile.tick_value
                     )
+
+                # 6b. Apply Dynamic Lot Sizing Modifier from Macro News Filter
+                lot_multiplier = float(news_filter.get("lot_multiplier", 1.0))
+                if lot_multiplier <= 0.0:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SETUP_REJECTED",
+                        "setup": setup_name,
+                        "reason": "News Filter: Trading lot multiplier is 0.0 (High risk freeze)"
+                    })
+                    continue
+                elif lot_multiplier < 1.0:
+                    lot_total = max(round(lot_total * lot_multiplier, 2), 0.01)
+                    lot_p1 = round(lot_total * 0.5, 2)
+                    lot_p2 = round(lot_total - lot_p1, 2)
 
                 if lot_total <= 0:
                     continue

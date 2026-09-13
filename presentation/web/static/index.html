@@ -40,6 +40,10 @@
         <span class="status-label">AutoTrading:</span>
         <span id="stat-autotrading-badge" class="status-val" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #21262d; border: 1px solid #30363d;">CHECKING...</span>
       </div>
+      <div class="status-item" style="display:flex; align-items:center;">
+        <span class="status-label">News Radar:</span>
+        <span id="stat-news-badge" class="status-val" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #238636; color:#fff; border: 1px solid #2ea043;">🟢 AN TOÀN</span>
+      </div>
     </div>
 
     <nav class="tab-nav">
@@ -314,6 +318,59 @@
           <div style="display:flex; align-self:flex-end;">
             <button class="btn btn-primary" onclick="saveAIConfig()" style="height:32px;">💾 Lưu & Kích Hoạt Key</button>
           </div>
+        </div>
+      </div>
+
+      <!-- GOLD MACRO NEWS & BLACKOUT RADAR -->
+      <div class="card" style="padding: 14px 18px; background: #161b22; border: 1px solid #30363d; margin-bottom: 8px;">
+        <div class="card-title" style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 14px;">📰 LỊCH TIN KINH TẾ & NHẬN ĐỊNH VĨ MÔ VÀNG (XAUUSD MACRO RADAR)</span>
+            <span id="news-blackout-badge" style="font-size: 11px; padding: 2px 10px; border-radius: 4px; background: #238636; color: #fff; font-weight: bold;">🟢 AN TOÀN GIAO DỊCH</span>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-primary" style="padding: 4px 12px; font-size: 11px;" onclick="triggerNewsAnalysis()">🔍 Quét & Phân Tích Tin Mới</button>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 12px; font-size: 12px; margin-bottom: 10px;">
+          <!-- Box 1: Khuyến nghị AI -->
+          <div style="background: #0d1117; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #58a6ff;">
+            <div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">NHẬN ĐỊNH VĨ MÔ & KHUYẾN NGHỊ:</div>
+            <div id="news-recommendation-text" style="color: #f0f6fc; line-height: 1.4;">Đang tải dữ liệu nhận định vĩ mô...</div>
+          </div>
+          <!-- Box 2: Xu hướng & Khối lượng -->
+          <div style="background: #0d1117; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #2ea043;">
+            <div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">XU HƯỚNG VĨ MÔ KHUYẾN NGHỊ:</div>
+            <div id="news-macro-bias" style="font-size: 13px; font-weight: bold; color: #58a6ff;">NEUTRAL</div>
+            <div style="margin-top: 6px; color: #8b949e; font-size: 11px;">Hệ số điều chỉnh Volume: <strong id="news-lot-multiplier" style="color: #e3b341;">1.0x (100%)</strong></div>
+          </div>
+          <!-- Box 3: Sự kiện tiếp theo & Đếm ngược -->
+          <div style="background: #0d1117; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #da3633;">
+            <div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">SỰ KIỆN KINH TẾ TIẾP THEO:</div>
+            <div id="news-next-event-title" style="font-weight: bold; color: #f85149;">Đang kiểm tra...</div>
+            <div id="news-next-event-time" style="color: #8b949e; font-size: 11px; margin-top: 2px;">-</div>
+            <div id="news-countdown-text" style="color: #e3b341; font-weight: bold; font-size: 11px; margin-top: 2px;">-</div>
+          </div>
+        </div>
+
+        <!-- Bảng danh sách sự kiện sắp tới -->
+        <div style="max-height: 140px; overflow-y: auto; background: #0d1117; border-radius: 4px; border: 1px solid #21262d;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
+            <thead>
+              <tr style="border-bottom: 1px solid #30363d; color: #8b949e; background: #161b22;">
+                <th style="padding: 6px 10px;">Thời Gian</th>
+                <th style="padding: 6px 10px;">Quốc Gia</th>
+                <th style="padding: 6px 10px;">Mức Độ</th>
+                <th style="padding: 6px 10px;">Sự Kiện</th>
+                <th style="padding: 6px 10px;">Dự Báo</th>
+                <th style="padding: 6px 10px;">Kỳ Trước</th>
+              </tr>
+            </thead>
+            <tbody id="news-calendar-tbody">
+              <tr><td colspan="6" style="padding: 10px; text-align: center; color: #8b949e;">Đang tải lịch kinh tế từ ForexFactory...</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
 

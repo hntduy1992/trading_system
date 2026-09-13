@@ -1,34 +1,34 @@
 {
-  "session_id": "sess_20260910_203315",
+  "session_id": "sess_20260911_165344",
   "symbol": "XAUUSD",
-  "generated_at": "2026-09-10T13:33:15.751160+00:00",
+  "generated_at": "2026-09-11T09:53:44.656853+00:00",
   "market_regime": "TRENDING_STEADY",
   "htf_zones": {
     "resistance_zones": [
       {
         "id": "res_maj_1",
-        "high": 4435.08,
-        "low": 4429.52,
+        "high": 4361.15,
+        "low": 4358.12,
         "significance": "MAJOR"
       },
       {
         "id": "res_min_1",
-        "high": 4401.82,
-        "low": 4398.49,
+        "high": 4358.5,
+        "low": 4356.68,
         "significance": "MINOR"
       }
     ],
     "support_zones": [
       {
         "id": "sup_maj_1",
-        "high": 4329.52,
-        "low": 4323.97,
+        "high": 4303.59,
+        "low": 4300.56,
         "significance": "MAJOR"
       },
       {
         "id": "sup_min_1",
-        "high": 4325.64,
-        "low": 4322.3,
+        "high": 4341.51,
+        "low": 4339.69,
         "significance": "MINOR"
       }
     ]

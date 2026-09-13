@@ -76,21 +76,32 @@ class RiskManager:
         opposite_momentum_detected: bool = False,
         lwp_orderflow_failed: bool = False,
         unrealized_r: float = 0.0,
-        price_progress_pct: float = 0.0
+        price_progress_pct: float = 0.0,
+        grace_period_bars: int = 4,
+        m3_structure_broken: bool = False
     ) -> Tuple[bool, str]:
         """
-        PREMISE_THREATENED (Dynamic Scratch Rule):
-          - Fast scratch: Opposite momentum bar closed beyond key node.
+        PREMISE_THREATENED (Two-Tier Dynamic Scratch Rule):
+          - Tier 1 Fast Scratch: Significant opposite momentum bar closed beyond key node (filtered by ATR).
+          - Tier 2 Structural Scratch: M3 swing closed beyond invalidation level.
           - Orderflow failure: Trapped traders order flow failed upon LWP breach.
-          - P&L Aware Timeout:
-            - If position has positive progress (unrealized_r >= 0.3 or progress >= 40%),
-              dynamically extend scratch timeout (e.g. up to 14 bars) to avoid premature exit.
-            - If position is stagnant or negative, scratch strictly at scratch_timeout_bars.
+          - Grace Period: First N bars are protected from timeout scratches to let price breathe.
+          - Dynamic timeout extension if trade is progressing favorably.
         """
+        # Tier 2: Higher timeframe structure confirmed broken
+        if m3_structure_broken:
+            return True, "Premise threatened: M3 structural swing violated key invalidation level."
+
+        # Tier 1: Emergency momentum threat
         if opposite_momentum_detected:
             return True, "Premise threatened: Opposite momentum bar closed beyond key node."
+
         if lwp_orderflow_failed:
             return True, "Premise threatened: Trapped traders order flow failed upon LWP breach."
+
+        # Timeout scratch protection: Do not scratch before grace period expires
+        if bars_in_trade < grace_period_bars:
+            return False, "PREMISE_INTACT (Grace Period Active)"
 
         # Dynamic timeout extension if position is progressing in profit towards T1
         effective_timeout = scratch_timeout_bars
@@ -101,3 +112,4 @@ class RiskManager:
             return True, f"Scratch timeout reached: {bars_in_trade} bars without directional resolution."
 
         return False, "PREMISE_INTACT"
+

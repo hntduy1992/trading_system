@@ -149,7 +149,9 @@ class PaperBroker(IBrokerGateway):
             "digits": self.profile.digits,
             "tick_value": self.profile.tick_value,
             "volume_min": 0.01,
-            "volume_step": 0.01
+            "volume_step": 0.01,
+            "ask": round(self._current_price + (0.20 if "XAU" in symbol.upper() else 0.00015), self.profile.digits),
+            "bid": round(self._current_price, self.profile.digits)
         }
 
 

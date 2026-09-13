@@ -153,14 +153,31 @@ class ManageLifecycleUseCase:
         # 3. Check Scratch Rule (Premise Threatened)
         # Only evaluate scratch if trade has had minimum safe holding time to breathe
         if trade.m1_bars_in_trade >= min_holding_bars and trade.state == PositionState.IN_POSITION:
+            from core.domain.rules.vector_dynamics import MicroPatternDetector
+            atr_1m = MicroPatternDetector.calculate_atr(bars_m1, period=14)
+            bar_range = curr_bar.high - curr_bar.low
+
             risk_dist = abs(trade.part1.entry_price - trade.part1.sl_price)
             t1_dist = abs(trade.part1.tp_price - trade.part1.entry_price)
+
+            # Tier 1 Fast Scratch: Opposite momentum bar MUST have significant range (>= 1.5 ATR)
+            is_significant_range = (bar_range >= max(1.5 * atr_1m, 0.5)) if atr_1m > 0 else True
+
+            # Tier 2: Check M3 structure breach (confirmed close against trade direction)
+            m3_structure_broken = False
+            if bars_m3 and len(bars_m3) >= 2:
+                latest_m3 = bars_m3[-1]
+                if trade.side == OrderSide.BUY:
+                    m3_structure_broken = (latest_m3.close < latest_m3.open) and (latest_m3.close < (trade.part1.entry_price - 0.5 * risk_dist))
+                else:
+                    m3_structure_broken = (latest_m3.close > latest_m3.open) and (latest_m3.close > (trade.part1.entry_price + 0.5 * risk_dist))
+
             if trade.side == OrderSide.BUY:
                 profit_dist = curr_price - trade.part1.entry_price
-                opp_momentum = (curr_bar.close < curr_bar.open) and (curr_bar.close < trade.part1.entry_price) and (risk_dist > 0 and (trade.part1.entry_price - curr_price) >= 0.55 * risk_dist)
+                opp_momentum = is_significant_range and (curr_bar.close < curr_bar.open) and (curr_bar.close < trade.part1.entry_price) and (risk_dist > 0 and (trade.part1.entry_price - curr_price) >= 0.65 * risk_dist)
             else:
                 profit_dist = trade.part1.entry_price - curr_price
-                opp_momentum = (curr_bar.close > curr_bar.open) and (curr_bar.close > trade.part1.entry_price) and (risk_dist > 0 and (curr_price - trade.part1.entry_price) >= 0.55 * risk_dist)
+                opp_momentum = is_significant_range and (curr_bar.close > curr_bar.open) and (curr_bar.close > trade.part1.entry_price) and (risk_dist > 0 and (curr_price - trade.part1.entry_price) >= 0.65 * risk_dist)
 
             unrealized_r = profit_dist / risk_dist if risk_dist > 0 else 0.0
             price_progress = profit_dist / t1_dist if t1_dist > 0 else 0.0
@@ -170,7 +187,9 @@ class ManageLifecycleUseCase:
                 scratch_timeout_bars=scratch_timeout_bars,
                 opposite_momentum_detected=opp_momentum,
                 unrealized_r=unrealized_r,
-                price_progress_pct=price_progress
+                price_progress_pct=price_progress,
+                grace_period_bars=4,
+                m3_structure_broken=m3_structure_broken
             )
             if is_scratch:
                 trade.state = PositionState.SCRATCHED

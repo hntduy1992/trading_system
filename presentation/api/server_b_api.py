@@ -16,6 +16,7 @@ from core.domain.interfaces.vector_store import IVectorStore
 from infrastructure.storage.json_store import LocalJsonStore
 from infrastructure.ai.gemini_adapter import GeminiAIAdapter
 from infrastructure.ai.openai_adapter import OpenAIAdapter
+from core.use_cases.intelligence.news_sentiment_analyzer import NewsSentimentAnalyzerUseCase
 
 class PlanRequest(BaseModel):
     symbol: str = "XAUUSD"
@@ -319,5 +320,57 @@ def create_server_b_app(
     async def get_lessons(query: str = "general", regime: str = "GENERAL", limit: int = 5):
         lessons = await vector_store.search_lessons(query=query, regime=regime, limit=limit)
         return {"lessons": lessons}
+
+    # =========================================================================
+    # GOLD MACRO NEWS & BLACKOUT ENGINE ENDPOINTS
+    # =========================================================================
+    news_analyzer = NewsSentimentAnalyzerUseCase(ai_engine=planner.ai_engine)
+
+    @app.get("/api/news/calendar")
+    async def get_economic_calendar():
+        """Fetches upcoming high/medium impact USD economic events from ForexFactory."""
+        try:
+            events = news_analyzer.news_fetcher.fetch_economic_calendar()
+            return {"status": "SUCCESS", "events": events, "count": len(events)}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch calendar: {e}")
+
+    @app.get("/api/news/status")
+    async def get_news_status():
+        """Returns real-time news blackout status, next high-impact release countdown, and AI macro bias."""
+        try:
+            status = await news_analyzer.execute(symbol="XAUUSD", force_refresh=False)
+            return {"status": "SUCCESS", "news_status": status}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to get news status: {e}")
+
+    @app.post("/api/news/analyze")
+    async def trigger_news_analysis():
+        """Triggers fresh AI macro news analysis and syncs blackout windows into active trading_config."""
+        try:
+            analysis = await news_analyzer.execute(symbol="XAUUSD", force_refresh=True)
+            
+            # Sync blackout windows and macro bias into active session config
+            if json_store:
+                try:
+                    cfg = json_store.load_session_config()
+                    if cfg:
+                        if "news_filter" not in cfg:
+                            cfg["news_filter"] = {}
+                        cfg["news_filter"]["blackout_windows"] = analysis.get("blackout_windows", [])
+                        cfg["news_filter"]["macro_bias"] = analysis.get("macro_bias", "NEUTRAL")
+                        cfg["news_filter"]["lot_multiplier"] = analysis.get("lot_multiplier", 1.0)
+                        cfg["news_filter"]["recommendation"] = analysis.get("recommendation_summary", "")
+                        json_store.save_session_config(cfg)
+                except Exception as ex:
+                    print(f"[Server B] Could not update trading_config with news analysis: {ex}")
+
+            return {
+                "status": "SUCCESS",
+                "analysis": analysis,
+                "message": "Đã phân tích tin tức và cập nhật cửa sổ né tin vào cấu hình phiên."
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to analyze news: {e}")
 
     return app

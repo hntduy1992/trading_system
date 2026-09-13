@@ -1361,6 +1361,123 @@ async function submitModifyPosition() {
   }
 }
 
+// =========================================================================
+// GOLD MACRO NEWS & BLACKOUT RADAR CLIENT FUNCTIONS
+// =========================================================================
+async function fetchNewsStatus() {
+  try {
+    const res = await fetch(`${SERVER_B_URL}/api/news/status`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const st = data.news_status;
+    if (!st) return;
+
+    // Header badge
+    const headBadge = document.getElementById("stat-news-badge");
+    const cardBadge = document.getElementById("news-blackout-badge");
+    if (st.is_in_blackout) {
+      if (headBadge) {
+        headBadge.textContent = "🔴 TẠM DỪNG NÉ TIN";
+        headBadge.style.background = "#da3633";
+        headBadge.style.borderColor = "#f85149";
+      }
+      if (cardBadge) {
+        cardBadge.textContent = "🔴 ĐANG TRONG GIỜ NÉ TIN ĐỎ";
+        cardBadge.style.background = "#da3633";
+      }
+    } else {
+      if (headBadge) {
+        headBadge.textContent = "🟢 AN TOÀN";
+        headBadge.style.background = "#238636";
+        headBadge.style.borderColor = "#2ea043";
+      }
+      if (cardBadge) {
+        cardBadge.textContent = "🟢 AN TOÀN GIAO DỊCH";
+        cardBadge.style.background = "#238636";
+      }
+    }
+
+    // Recommendation summary
+    const recEl = document.getElementById("news-recommendation-text");
+    if (recEl) recEl.textContent = st.recommendation_summary || st.active_blackout_reason || "Môi trường tin tức bình thường.";
+
+    // Macro bias & Lot multiplier
+    const biasEl = document.getElementById("news-macro-bias");
+    if (biasEl) {
+      biasEl.textContent = st.macro_bias || "NEUTRAL";
+      biasEl.style.color = (st.macro_bias && st.macro_bias.includes("BULLISH")) ? "#2ea043" : ((st.macro_bias && st.macro_bias.includes("BEARISH")) ? "#da3633" : "#58a6ff");
+    }
+
+    const multEl = document.getElementById("news-lot-multiplier");
+    if (multEl) {
+      const mult = st.lot_multiplier !== undefined ? st.lot_multiplier : 1.0;
+      multEl.textContent = `${mult}x (${Math.round(mult * 100)}%)`;
+      multEl.style.color = mult === 0 ? "#da3633" : (mult < 1.0 ? "#e3b341" : "#2ea043");
+    }
+
+    // Next event & countdown
+    const nextTitle = document.getElementById("news-next-event-title");
+    const nextTime = document.getElementById("news-next-event-time");
+    const countdownEl = document.getElementById("news-countdown-text");
+    const nextEv = st.next_event;
+    if (nextEv && nextEv.title) {
+      if (nextTitle) nextTitle.textContent = `${nextEv.impact === 'HIGH' ? '🔴' : '🟠'} ${nextEv.title}`;
+      if (nextTime) nextTime.textContent = nextEv.time_str || "-";
+      if (countdownEl) {
+        if (nextEv.minutes_left !== null && nextEv.minutes_left !== undefined) {
+          if (nextEv.minutes_left > 0) {
+            const h = Math.floor(nextEv.minutes_left / 60);
+            const m = Math.round(nextEv.minutes_left % 60);
+            countdownEl.textContent = `⏳ Còn ${h > 0 ? h + 'h ' : ''}${m} phút`;
+          } else {
+            countdownEl.textContent = "⚡ Đang diễn ra!";
+          }
+        } else {
+          countdownEl.textContent = "-";
+        }
+      }
+    }
+
+    // Calendar table
+    const tbody = document.getElementById("news-calendar-tbody");
+    if (tbody && st.calendar_events && st.calendar_events.length > 0) {
+      tbody.innerHTML = st.calendar_events.map(ev => `
+        <tr style="border-bottom: 1px solid #21262d;">
+          <td style="padding: 5px 10px; color: #c9d1d9;">${ev.datetime_str || '-'}</td>
+          <td style="padding: 5px 10px; font-weight: bold; color: #58a6ff;">${ev.country}</td>
+          <td style="padding: 5px 10px;">
+            <span style="padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; background: ${ev.impact === 'HIGH' ? '#da3633' : '#d29922'}; color: #fff;">
+              ${ev.impact}
+            </span>
+          </td>
+          <td style="padding: 5px 10px; color: #f0f6fc;">${ev.title}</td>
+          <td style="padding: 5px 10px; color: #8b949e;">${ev.forecast || '-'}</td>
+          <td style="padding: 5px 10px; color: #8b949e;">${ev.previous || '-'}</td>
+        </tr>
+      `).join("");
+    }
+  } catch (e) {}
+}
+
+async function triggerNewsAnalysis() {
+  const btn = window.event ? window.event.target : null;
+  const oldText = btn ? btn.textContent : "";
+  if (btn) btn.textContent = "⏳ Đang quét AI...";
+  try {
+    const res = await fetch(`${SERVER_B_URL}/api/news/analyze`, { method: "POST" });
+    if (res.ok) {
+      alert("✅ Đã hoàn tất quét tin tức và cập nhật khuyến nghị né tin vĩ mô!");
+      fetchNewsStatus();
+    } else {
+      alert("❌ Không thể phân tích tin tức lúc này.");
+    }
+  } catch (e) {
+    alert(`Lỗi kết nối Server B: ${e.message}`);
+  } finally {
+    if (btn) btn.textContent = oldText || "🔍 Quét & Phân Tích Tin Mới";
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   initCharts();
   loadInitialBars();
@@ -1371,6 +1488,7 @@ window.addEventListener("DOMContentLoaded", () => {
   fetchRadarFallback();
   loadAIConfig();
   loadRiskConfig();
+  fetchNewsStatus();
   setInterval(() => {
     fetchStatus();
     fetchPositions();
@@ -1378,5 +1496,6 @@ window.addEventListener("DOMContentLoaded", () => {
     fetchLatestBarsFallback();
     fetchRadarFallback();
   }, 1500);
+  setInterval(fetchNewsStatus, 15000);
 });
 

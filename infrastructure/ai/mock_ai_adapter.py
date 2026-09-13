@@ -183,6 +183,8 @@ class MockAIEngine(IAIEngine):
         regime = trading_config.get("market_regime", "SIDEWAYS_RANGE")
         setups_enabled = trading_config.get("setups_enabled", {})
 
+        symbol = candidate_context.get("symbol") or trading_config.get("symbol", "XAUUSD")
+        trend = candidate_context.get("trend", "SIDEWAYS")
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         concerns = []
 
@@ -196,6 +198,25 @@ class MockAIEngine(IAIEngine):
                 evaluated_at=now_str,
                 model_name="MockAIEngine-Deterministic"
             )
+
+        # 1b. Strict Regime & Trend Gating Matrix
+        from core.domain.rules.setups.base import BaseSetup
+        from core.domain.models import SetupType, OrderSide, get_instrument_profile
+        try:
+            s_type = SetupType(setup)
+            o_side = OrderSide(side)
+            is_compat, compat_msg = BaseSetup.is_setup_compatible(s_type, o_side, regime, trend)
+            if not is_compat:
+                return PreEntryEvaluation(
+                    approved=False,
+                    confidence=0.96,
+                    reason=f"Từ chối vào lệnh: {compat_msg}",
+                    concerns=[f"Incompatible setup {setup} {side} for {regime} {trend}"],
+                    evaluated_at=now_str,
+                    model_name="MockAIEngine-Deterministic"
+                )
+        except Exception:
+            pass
 
         # 2. Wholesale Validity Check
         if wholesale and wholesale.get("is_valid_entry") is False:
@@ -220,7 +241,7 @@ class MockAIEngine(IAIEngine):
                 model_name="MockAIEngine-Deterministic"
             )
 
-        # 4. Check SL distance safety
+        # 4. Check SL distance safety & Instrument Min SL Floor
         risk_dist = abs(order_price - sl)
         if risk_dist <= 0:
             return PreEntryEvaluation(
@@ -228,6 +249,17 @@ class MockAIEngine(IAIEngine):
                 confidence=0.99,
                 reason="Khoảng cách Stop Loss không hợp lệ (bằng hoặc trùng với điểm vào).",
                 concerns=["Invalid stop loss level"],
+                evaluated_at=now_str,
+                model_name="MockAIEngine-Deterministic"
+            )
+
+        profile = get_instrument_profile(symbol)
+        if risk_dist < (profile.min_sl_points * 0.8):
+            return PreEntryEvaluation(
+                approved=False,
+                confidence=0.92,
+                reason=f"Khoảng cách SL ({risk_dist:.2f}) quá hẹp so với sàn an toàn ({profile.min_sl_points:.2f} USD). Dễ bị quét do spread và biến động.",
+                concerns=[f"Stop loss distance {risk_dist:.2f} violates safe floor {profile.min_sl_points:.2f}"],
                 evaluated_at=now_str,
                 model_name="MockAIEngine-Deterministic"
             )

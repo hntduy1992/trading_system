@@ -18,6 +18,22 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+# Silence harmless Windows asyncio WinError 10054 connection reset bug
+if sys.platform == "win32":
+    try:
+        from asyncio.proactor_events import _ProactorBasePipeTransport
+        _orig_call_connection_lost = _ProactorBasePipeTransport._call_connection_lost
+
+        def _silenced_call_connection_lost(self, *args, **kwargs):
+            try:
+                return _orig_call_connection_lost(self, *args, **kwargs)
+            except (ConnectionResetError, OSError):
+                pass
+
+        _ProactorBasePipeTransport._call_connection_lost = _silenced_call_connection_lost
+    except Exception:
+        pass
+
 import uvicorn
 from config import CONFIG
 from core.domain.models import TradeLifecycle, SessionConfig, PositionState
@@ -514,6 +530,17 @@ def main():
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    if sys.platform == "win32":
+        def _loop_exception_handler(loop_instance, context):
+            exc = context.get("exception")
+            if isinstance(exc, ConnectionResetError) or (
+                isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10054
+            ):
+                return
+            loop_instance.default_exception_handler(context)
+
+        loop.set_exception_handler(_loop_exception_handler)
 
     try:
         loop.run_until_complete(orchestrator.start(
