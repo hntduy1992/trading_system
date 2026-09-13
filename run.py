@@ -42,6 +42,7 @@ from core.use_cases.execution.manage_lifecycle import ManageLifecycleUseCase
 from core.use_cases.execution.circuit_breaker import CircuitBreakerUseCase
 from core.use_cases.intelligence.pre_session_planner import PreSessionPlannerUseCase
 from core.use_cases.intelligence.hindsight_auditor import HindsightAuditorUseCase
+from core.domain.rules.candlestick_engine import CandlestickEngine
 
 from infrastructure.bus.async_event_bus import AsyncEventBus
 from infrastructure.storage.memory_vector_store import MemoryVectorStore
@@ -391,6 +392,7 @@ class SystemOrchestrator:
                         "lot_total": 0.17 if "XAU" in self.symbol else 0.50,
                         "lot_p1": 0.08 if "XAU" in self.symbol else 0.25,
                         "lot_p2": 0.09 if "XAU" in self.symbol else 0.25,
+                        "micro_candle": CandlestickEngine.extract_micro_candle_context(m1_bars) if m1_bars else {}
                     }
 
                 self.state["setup_radar"] = radar

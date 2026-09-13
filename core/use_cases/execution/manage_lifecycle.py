@@ -44,25 +44,41 @@ class ManageLifecycleUseCase:
         if trade.state == PositionState.PENDING_ENTRY:
             # Check if price triggered limit entry or stop entry
             filled = False
+            is_pure_stop = bool(trade.stop_order_ticket and not trade.limit_order_ticket)
+            is_pure_limit = bool(trade.limit_order_ticket and not trade.stop_order_ticket)
+
             if trade.side == OrderSide.BUY:
-                if curr_bar.low <= trade.part1.entry_price:
-                    filled = True
-                    # Cancel alternate stop order
-                    if trade.stop_order_ticket:
-                        await self.broker.cancel_order(trade.stop_order_ticket)
-                elif curr_bar.high >= trade.part2.entry_price:  # LWP Stop fill
-                    filled = True
-                    if trade.limit_order_ticket:
-                        await self.broker.cancel_order(trade.limit_order_ticket)
+                if is_pure_stop:
+                    if curr_bar.high >= trade.part1.entry_price:
+                        filled = True
+                elif is_pure_limit:
+                    if curr_bar.low <= trade.part1.entry_price:
+                        filled = True
+                else:
+                    if curr_bar.low <= trade.part1.entry_price:
+                        filled = True
+                        if trade.stop_order_ticket:
+                            await self.broker.cancel_order(trade.stop_order_ticket)
+                    elif curr_bar.high >= trade.part2.entry_price:
+                        filled = True
+                        if trade.limit_order_ticket:
+                            await self.broker.cancel_order(trade.limit_order_ticket)
             else:
-                if curr_bar.high >= trade.part1.entry_price:
-                    filled = True
-                    if trade.stop_order_ticket:
-                        await self.broker.cancel_order(trade.stop_order_ticket)
-                elif curr_bar.low <= trade.part2.entry_price:
-                    filled = True
-                    if trade.limit_order_ticket:
-                        await self.broker.cancel_order(trade.limit_order_ticket)
+                if is_pure_stop:
+                    if curr_bar.low <= trade.part1.entry_price:
+                        filled = True
+                elif is_pure_limit:
+                    if curr_bar.high >= trade.part1.entry_price:
+                        filled = True
+                else:
+                    if curr_bar.high >= trade.part1.entry_price:
+                        filled = True
+                        if trade.stop_order_ticket:
+                            await self.broker.cancel_order(trade.stop_order_ticket)
+                    elif curr_bar.low <= trade.part2.entry_price:
+                        filled = True
+                        if trade.limit_order_ticket:
+                            await self.broker.cancel_order(trade.limit_order_ticket)
 
             if filled:
                 trade.state = PositionState.IN_POSITION
@@ -73,6 +89,47 @@ class ManageLifecycleUseCase:
                     "trade_id": trade.trade_id,
                     "state": trade.state.value
                 })
+            else:
+                # Check Time-In-Force pending order expiry (Vol 5: 1-bar or 3-bar timeout)
+                if trade.last_bar_timestamp is None:
+                    trade.last_bar_timestamp = curr_bar.timestamp
+                    trade.m1_bars_in_trade = 0
+                elif trade.last_bar_timestamp != curr_bar.timestamp:
+                    trade.last_bar_timestamp = curr_bar.timestamp
+                    trade.m1_bars_in_trade += 1
+
+                max_pending = getattr(trade, "max_bars_pending", None)
+                if max_pending is not None and trade.m1_bars_in_trade >= max_pending:
+                    # Time-In-Force expired: Cancel pending order immediately
+                    cancelled_tickets = []
+                    if trade.limit_order_ticket:
+                        await self.broker.cancel_order(trade.limit_order_ticket)
+                        cancelled_tickets.append(trade.limit_order_ticket)
+                    if trade.stop_order_ticket:
+                        await self.broker.cancel_order(trade.stop_order_ticket)
+                        cancelled_tickets.append(trade.stop_order_ticket)
+                    if trade.part1.ticket and trade.part1.ticket not in cancelled_tickets:
+                        await self.broker.cancel_order(trade.part1.ticket)
+                        cancelled_tickets.append(trade.part1.ticket)
+
+                    trade.state = PositionState.SCRATCHED
+                    trade.close_time = time.time()
+                    trade.part1.is_closed = True
+                    trade.part2.is_closed = True
+                    trade.close_context = {
+                        "reason": f"Time-In-Force expired ({trade.m1_bars_in_trade} bars >= max {max_pending} bars)",
+                        "bars_elapsed": trade.m1_bars_in_trade
+                    }
+                    await self.event_bus.publish("telemetry", {
+                        "type": "PENDING_ORDER_EXPIRED",
+                        "trade_id": trade.trade_id,
+                        "setup": trade.setup_type.value if hasattr(trade.setup_type, "value") else str(trade.setup_type),
+                        "bars_elapsed": trade.m1_bars_in_trade,
+                        "max_bars": max_pending,
+                        "message": f"⏳ Lệnh chờ {trade.trade_id} ({trade.setup_type.value}) tự động hủy do quá thời gian {max_pending} nến chưa khớp."
+                    })
+                    print(f"[ENGINE] Pending Order Expired & Cancelled: {trade.trade_id} after {trade.m1_bars_in_trade} bars (max {max_pending}).")
+
             return trade
 
         # 2. State: IN_POSITION

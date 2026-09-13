@@ -28,6 +28,12 @@ class SetupType(str, Enum):
     BPB = "BPB"   # Breakout Pullback
     PB = "PB"     # Pullback
     CPB = "CPB"   # Complex Pullback
+    # Vol 5 Price Action Setups
+    TREND_BAR_FAIL = "TREND_BAR_FAIL"
+    INSIDE_BAR_SMA21 = "INSIDE_BAR_SMA21"
+    ID_NR4 = "ID_NR4"
+    NR7_EMA20 = "NR7_EMA20"
+    YUM_YUM = "YUM_YUM"
 
 class OrderSide(str, Enum):
     BUY = "BUY"
@@ -51,6 +57,22 @@ class Bar:
     close: float
     volume: float = 0.0
     timeframe: str = "M1"  # "M1", "M3", "M30"
+
+    @property
+    def range(self) -> float:
+        return self.high - self.low
+
+    @property
+    def body(self) -> float:
+        return abs(self.close - self.open)
+
+    @property
+    def upper_wick(self) -> float:
+        return self.high - max(self.open, self.close)
+
+    @property
+    def lower_wick(self) -> float:
+        return min(self.open, self.close) - self.low
 
     @property
     def high_wick(self) -> float:
@@ -142,6 +164,7 @@ class TradeLifecycle:
     anchor_id: Optional[str] = None
     close_time: Optional[float] = None
     spatial_anchor_key: Optional[str] = None
+    max_bars_pending: Optional[int] = None
     entry_context: Optional[Dict[str, Any]] = None
     close_context: Optional[Dict[str, Any]] = None
 

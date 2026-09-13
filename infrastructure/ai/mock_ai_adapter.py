@@ -54,7 +54,12 @@ class MockAIEngine(IAIEngine):
                 "BOF": False,
                 "BPB": True,
                 "PB": True,
-                "CPB": True
+                "CPB": True,
+                "TREND_BAR_FAIL": True,
+                "INSIDE_BAR_SMA21": True,
+                "ID_NR4": False,
+                "NR7_EMA20": True,
+                "YUM_YUM": True
             }
         elif "SIDEWAYS" in trend_str:
             regime = MarketRegime.SIDEWAYS_RANGE
@@ -63,7 +68,12 @@ class MockAIEngine(IAIEngine):
                 "BOF": True,
                 "BPB": False,
                 "PB": False,
-                "CPB": False
+                "CPB": False,
+                "TREND_BAR_FAIL": True,
+                "INSIDE_BAR_SMA21": False,
+                "ID_NR4": True,
+                "NR7_EMA20": False,
+                "YUM_YUM": False
             }
         else:
             # Choppy / Undetermined: enable all active setups to catch valid PA triggers
@@ -73,7 +83,12 @@ class MockAIEngine(IAIEngine):
                 "BOF": True,
                 "BPB": True,
                 "PB": True,
-                "CPB": True
+                "CPB": True,
+                "TREND_BAR_FAIL": True,
+                "INSIDE_BAR_SMA21": True,
+                "ID_NR4": True,
+                "NR7_EMA20": True,
+                "YUM_YUM": True
             }
 
         digits = profile.digits

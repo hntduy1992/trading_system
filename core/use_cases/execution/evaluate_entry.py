@@ -14,6 +14,10 @@ from core.domain.rules.wholesale_engine import WholesaleEngine
 from core.domain.rules.risk_manager import RiskManager
 from core.domain.rules.setups.base import BaseSetup
 from core.domain.rules.setups.setups import TSTSetup, BOFSetup, BPBSetup, PBSetup, CPBSetup
+from core.domain.rules.setups.candlestick_setups import (
+    TrendBarFailSetup, InsideBarSMA21Setup, IDNR4Setup, NR7EMA20Setup, YumYumSetup
+)
+from core.domain.rules.candlestick_engine import CandlestickEngine
 from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
 
@@ -27,7 +31,13 @@ class EvaluateEntryUseCase:
             "BOF": BOFSetup(),
             "BPB": BPBSetup(),
             "PB": PBSetup(),
-            "CPB": CPBSetup()
+            "CPB": CPBSetup(),
+            # Price Action Vol 5 Setups
+            "TREND_BAR_FAIL": TrendBarFailSetup(),
+            "INSIDE_BAR_SMA21": InsideBarSMA21Setup(),
+            "ID_NR4": IDNR4Setup(),
+            "NR7_EMA20": NR7EMA20Setup(),
+            "YUM_YUM": YumYumSetup()
         }
         self.consumed_anchors: set = set()
         self.stopped_out_anchors: set = set()
@@ -388,6 +398,7 @@ class EvaluateEntryUseCase:
                         "tp2": actual_tp2,
                         "wholesale": wholesale.__dict__,
                         "stall_range": {"low": stall_low, "high": stall_high},
+                        "micro_candle_context": CandlestickEngine.extract_micro_candle_context(bars_m1),
                         "nearest_zones": [
                             {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low}
                             for z in (config.resistance_zones + config.support_zones)
@@ -510,6 +521,16 @@ class EvaluateEntryUseCase:
 
                 initial_state = PositionState.IN_POSITION if order_type == "MARKET" else PositionState.PENDING_ENTRY
 
+                # Calculate Time-In-Force (Order Expiry Bars) according to Vol 5 Spec
+                if setup_name == "TREND_BAR_FAIL":
+                    max_bars_pending = 1  # Strict 1-bar expiry for counter-trend trap
+                elif setup_name == "YUM_YUM":
+                    max_bars_pending = 3  # Max 3-bar expiry for momentum continuation breakout
+                elif setup_name in ["INSIDE_BAR_SMA21", "ID_NR4", "NR7_EMA20"]:
+                    max_bars_pending = 3
+                else:
+                    max_bars_pending = None
+
                 lifecycle = TradeLifecycle(
                     trade_id=trade_id,
                     symbol=config.symbol,
@@ -525,6 +546,7 @@ class EvaluateEntryUseCase:
                     last_bar_timestamp=bars_m1[-1].timestamp if bars_m1 else None,
                     anchor_id=anchor_id,
                     spatial_anchor_key=spatial_anchor_key,
+                    max_bars_pending=max_bars_pending,
                     entry_context=entry_context
                 )
 
