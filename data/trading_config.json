@@ -1,34 +1,34 @@
 {
-  "session_id": "sess_20260911_165344",
+  "session_id": "sess_20260915_134906",
   "symbol": "XAUUSD",
-  "generated_at": "2026-09-11T09:53:44.656853+00:00",
+  "generated_at": "2026-09-15T13:49:06.689074+00:00",
   "market_regime": "TRENDING_STEADY",
   "htf_zones": {
     "resistance_zones": [
       {
         "id": "res_maj_1",
-        "high": 4361.15,
-        "low": 4358.12,
+        "high": 4318.0,
+        "low": 4314.0,
         "significance": "MAJOR"
       },
       {
         "id": "res_min_1",
-        "high": 4358.5,
-        "low": 4356.68,
+        "high": 4298.0,
+        "low": 4295.0,
         "significance": "MINOR"
       }
     ],
     "support_zones": [
       {
         "id": "sup_maj_1",
-        "high": 4303.59,
-        "low": 4300.56,
+        "high": 4264.0,
+        "low": 4261.0,
         "significance": "MAJOR"
       },
       {
         "id": "sup_min_1",
-        "high": 4341.51,
-        "low": 4339.69,
+        "high": 4283.0,
+        "low": 4280.0,
         "significance": "MINOR"
       }
     ]
@@ -38,7 +38,12 @@
     "BOF": false,
     "BPB": true,
     "PB": true,
-    "CPB": true
+    "CPB": true,
+    "TREND_BAR_FAIL": false,
+    "INSIDE_BAR_SMA21": true,
+    "ID_NR4": true,
+    "NR7_EMA20": true,
+    "YUM_YUM": true
   },
   "execution_rules": {
     "min_rr_ratio_part1": 1.0,
@@ -54,7 +59,8 @@
     "part2_risk_percent": 0.5,
     "session_drawdown_timeout_percent": 2.0,
     "session_drawdown_hardstop_percent": 3.0,
-    "business_drawdown_stop_percent": 20.0
+    "business_drawdown_stop_percent": 20.0,
+    "max_session_trades": 12
   },
   "news_filter": {
     "blackout_before_minutes": 15,

@@ -5,10 +5,18 @@ Allows immediate local testing and offline development
 """
 from typing import Dict, Any, List
 import datetime
+import json
 from core.domain.interfaces.ai_engine import IAIEngine
 from core.domain.models import (
     SessionConfig, MarketRegime, HTFZone, Significance, AuditReport, PreEntryEvaluation
 )
+
+# Mirrors the encoding in post_trade_evaluator._SETUP_CODE (for decoding lesson records)
+_SETUP_CODE_MAP = {
+    "TST": "TST", "BOF": "BOF", "BPB": "BPB", "PB": "PB", "CPB": "CPB",
+    "TREND_BAR_FAIL": "TBF", "INSIDE_BAR_SMA21": "IB", "ID_NR4": "IDN4",
+    "NR7_EMA20": "NR7", "YUM_YUM": "YY", "MANUAL": "MAN"
+}
 
 class MockAIEngine(IAIEngine):
     async def generate_pre_session_plan(
@@ -66,14 +74,14 @@ class MockAIEngine(IAIEngine):
             setups_enabled = {
                 "TST": True,
                 "BOF": True,
-                "BPB": False,
+                "BPB": True,
                 "PB": False,
-                "CPB": False,
+                "CPB": True,
                 "TREND_BAR_FAIL": True,
-                "INSIDE_BAR_SMA21": False,
+                "INSIDE_BAR_SMA21": True,
                 "ID_NR4": True,
-                "NR7_EMA20": False,
-                "YUM_YUM": False
+                "NR7_EMA20": True,
+                "YUM_YUM": True
             }
         else:
             # Choppy / Undetermined: enable all active setups to catch valid PA triggers
@@ -102,16 +110,22 @@ class MockAIEngine(IAIEngine):
             session_low = curr_price - profile.default_t2_points
             zone_width = profile.sr_proximity_points * 1.5
 
-        # Extract real structural S/R zones from M30 / M3 swings
+        # Extract real structural S/R zones:
+        # - Minor zones from TTF (M3) nearest swing high and nearest swing low
+        # - Major zones from HTF (M30) session high and session low
         swings_30m = SwingDetector.detect_swings(bars_m30) if bars_m30 else []
-        sh_above = [s for s in (swings_30m or swings_3m) if s.price > curr_price]
-        sl_below = [s for s in (swings_30m or swings_3m) if s.price < curr_price]
+        sh_m3 = [s for s in swings_3m if s.price > curr_price]
+        sl_m3 = [s for s in swings_3m if s.price < curr_price]
+        sh_m30 = [s for s in swings_30m if s.price > curr_price]
+        sl_m30 = [s for s in swings_30m if s.price < curr_price]
+
+        nearest_sh = min(sh_m3, key=lambda s: s.price) if sh_m3 else (min(sh_m30, key=lambda s: s.price) if sh_m30 else None)
+        nearest_sl = max(sl_m3, key=lambda s: s.price) if sl_m3 else (max(sl_m30, key=lambda s: s.price) if sl_m30 else None)
 
         # Resistance zones
-        if sh_above:
-            nearest_sh = min(sh_above, key=lambda s: s.price)
-            res_min_high = round(nearest_sh.price + zone_width * 0.3, digits)
-            res_min_low = round(nearest_sh.price - zone_width * 0.3, digits)
+        if nearest_sh:
+            res_min_high = round(nearest_sh.price + zone_width * 0.25, digits)
+            res_min_low = round(nearest_sh.price - zone_width * 0.25, digits)
         else:
             res_min_low = round(curr_price + profile.sr_proximity_points * 2, digits)
             res_min_high = round(res_min_low + zone_width, digits)
@@ -120,16 +134,23 @@ class MockAIEngine(IAIEngine):
         res_maj_low = round(session_high - zone_width, digits)
 
         # Support zones
-        if sl_below:
-            nearest_sl = max(sl_below, key=lambda s: s.price)
-            sup_min_high = round(nearest_sl.price + zone_width * 0.3, digits)
-            sup_min_low = round(nearest_sl.price - zone_width * 0.3, digits)
+        if nearest_sl:
+            sup_min_high = round(nearest_sl.price + zone_width * 0.25, digits)
+            sup_min_low = round(nearest_sl.price - zone_width * 0.25, digits)
         else:
             sup_min_high = round(curr_price - profile.sr_proximity_points * 2, digits)
             sup_min_low = round(sup_min_high - zone_width, digits)
 
         sup_maj_low = round(session_low, digits)
         sup_maj_high = round(session_low + zone_width, digits)
+
+        # Ensure major levels stay strictly separated from minor levels
+        if sup_min_high <= sup_maj_high:
+            sup_maj_low = round(session_low - zone_width, digits)
+            sup_maj_high = round(session_low, digits)
+        if res_min_low >= res_maj_low:
+            res_maj_low = round(session_high, digits)
+            res_maj_high = round(session_high + zone_width, digits)
 
         res_zones = [
             HTFZone(id="res_maj_1", high=res_maj_high, low=res_maj_low, significance=Significance.MAJOR, zone_type="RESISTANCE"),
@@ -156,7 +177,8 @@ class MockAIEngine(IAIEngine):
             "part2_risk_percent": 0.5,
             "session_drawdown_timeout_percent": 2.0,
             "session_drawdown_hardstop_percent": 3.0,
-            "business_drawdown_stop_percent": 20.0
+            "business_drawdown_stop_percent": 20.0,
+            "max_session_trades": 12
         }
 
         news_filter = {
@@ -279,11 +301,50 @@ class MockAIEngine(IAIEngine):
                 model_name="MockAIEngine-Deterministic"
             )
 
+        # Incorporate session-based lessons (structured numeric records)
+        session_lessons = candidate_context.get("session_lessons") or []
+        if session_lessons:
+            # Decode structured records: {"s":"IB","d":"B","r":"SO","ctx":"SL_hit",...}
+            has_stopout = False
+            same_setup_stopout = False
+            for l in session_lessons:
+                try:
+                    rec = json.loads(l) if isinstance(l, str) and l.startswith("{") else {}
+                except Exception:
+                    rec = {}
+                result = rec.get("r", "")
+                ctx = rec.get("ctx", "")
+                s = rec.get("s", "")
+                setup_code = _SETUP_CODE_MAP.get(setup, setup[:6])
+                if result in ("SO",) or "SL_hit" in ctx:
+                    has_stopout = True
+                    if s == setup_code:
+                        same_setup_stopout = True
+
+            if same_setup_stopout and risk_dist < (profile.min_sl_points * 1.1):
+                return PreEntryEvaluation(
+                    approved=False,
+                    confidence=0.91,
+                    reason=f"Reject per session record: {setup} stopped out previously. SL dist ({risk_dist:.2f}) still tight.",
+                    concerns=[f"Recent SO record for {setup} warns against tight SL"],
+                    evaluated_at=now_str,
+                    model_name="MockAIEngine-Deterministic"
+                )
+            elif has_stopout and risk_dist < (profile.min_sl_points * 1.0):
+                return PreEntryEvaluation(
+                    approved=False,
+                    confidence=0.88,
+                    reason=f"Reject per session record: prior SO detected. SL dist ({risk_dist:.2f}) must exceed {profile.min_sl_points:.2f}.",
+                    concerns=["Session SO record requires wider SL buffer"],
+                    evaluated_at=now_str,
+                    model_name="MockAIEngine-Deterministic"
+                )
+
         # Approved
         return PreEntryEvaluation(
             approved=True,
-            confidence=0.86,
-            reason=f"Setup {setup} {side} đạt chuẩn Price Action YTC: Nằm trọn trong vùng giá sỉ Wholesale (R:R={rr:.1f}), bám sát cấu trúc sóng M3 và có nén micro-stall bảo vệ.",
+            confidence=0.88,
+            reason=f"Setup {setup} {side} YTC approved: Wholesale valid (R:R={rr:.1f}), regime/trend compatible, SL floor OK.",
             concerns=[],
             suggested_modifications={},
             evaluated_at=now_str,

@@ -167,6 +167,7 @@ class TradeLifecycle:
     max_bars_pending: Optional[int] = None
     entry_context: Optional[Dict[str, Any]] = None
     close_context: Optional[Dict[str, Any]] = None
+    reflection: Optional[Dict[str, Any]] = None
 
 @dataclass
 class SessionConfig:

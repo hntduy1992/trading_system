@@ -3,6 +3,7 @@ MetaTrader 5 Real-Time Execution Adapter
 Triển khai IBrokerGateway kết nối native MT5 Terminal trên Windows
 """
 import time
+import asyncio
 from typing import List, Optional, Dict, Any
 from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.models import Bar, OrderSide
@@ -166,6 +167,9 @@ class MT5Broker(IBrokerGateway):
             else:
                 candidate_fillings = [mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC]
 
+        # MT5 comment field: must be plain ASCII str, max 31 chars
+        safe_comment = str(comment).encode("ascii", errors="ignore").decode("ascii")[:31]
+
         res = None
         for fill_mode in candidate_fillings:
             request = {
@@ -178,7 +182,7 @@ class MT5Broker(IBrokerGateway):
                 "tp": float(tp),
                 "deviation": 20,
                 "magic": 2102026,
-                "comment": comment,
+                "comment": safe_comment,
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": fill_mode
             }
@@ -213,53 +217,123 @@ class MT5Broker(IBrokerGateway):
         return bool(res and res.retcode == mt5.TRADE_RETCODE_DONE)
 
     async def close_position(self, ticket: int, volume: Optional[float] = None) -> bool:
-        if not self.connected:
+        if not self.connected or not MT5_AVAILABLE:
             return False
 
-        # 1. Try finding position by ticket
+        # 1. Smart position lookup:
+        # A. Try direct ticket lookup
         pos = mt5.positions_get(ticket=ticket)
+
+        # B. If not found, check if ticket is position identifier (initial order ticket)
         if not pos:
-            # 2. Try finding positions with our magic number
+            all_pos = mt5.positions_get()
+            if all_pos:
+                matched = [p for p in all_pos if p.ticket == ticket or getattr(p, "identifier", None) == ticket]
+                if matched:
+                    pos = tuple(matched)
+
+        # C. If not in positions, check if it is still an active pending order in MT5
+        if not pos:
+            pending_orders = mt5.orders_get(ticket=ticket)
+            if not pending_orders:
+                all_orders = mt5.orders_get()
+                if all_orders:
+                    matched_ord = [o for o in all_orders if o.ticket == ticket]
+                    if matched_ord:
+                        pending_orders = tuple(matched_ord)
+
+            if pending_orders:
+                print(f"[MT5Broker] Ticket {ticket} is an active pending order. Cancelling via cancel_order...")
+                return await self.cancel_order(ticket)
+
+        # D. If still not found, check if any open position with our magic number
+        if not pos:
             all_magic_pos = mt5.positions_get(magic=2102026)
             if all_magic_pos:
                 pos = all_magic_pos
 
         if not pos:
+            # Check if ticket was already closed in deal history
+            deals = mt5.history_deals_get(position=ticket)
+            if deals:
+                print(f"[MT5Broker] Position ticket {ticket} was already closed in MT5 deal history.")
+                return True
             print(f"[MT5Broker] Position ticket {ticket} not found to close.")
             return False
 
         p = pos[0]
         close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        tick = mt5.symbol_info_tick(p.symbol)
-        if not tick:
-            return False
-        price = tick.bid if p.type == mt5.POSITION_TYPE_BUY else tick.ask
         vol = volume or p.volume
 
         info = mt5.symbol_info(p.symbol)
         filling_mode = info.filling_mode if info else 1
-        fill_mode = mt5.ORDER_FILLING_IOC if (filling_mode & 2) else (mt5.ORDER_FILLING_FOK if (filling_mode & 1) else mt5.ORDER_FILLING_RETURN)
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": p.ticket,
-            "symbol": p.symbol,
-            "volume": float(vol),
-            "type": close_type,
-            "price": price,
-            "deviation": 20,
-            "magic": 2102026,
-            "comment": "YTC_CLOSE",
-            "type_filling": fill_mode
-        }
-        res = mt5.order_send(request)
-        success = bool(res and res.retcode == mt5.TRADE_RETCODE_DONE)
-        if success:
-            print(f"[MT5Broker] Successfully closed position {p.ticket} (vol={vol})")
+        # Candidate filling modes fallback
+        if filling_mode & 2:
+            candidate_fillings = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        elif filling_mode & 1:
+            candidate_fillings = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
         else:
-            err = res.comment if res else mt5.last_error()
-            print(f"[MT5Broker] Failed to close position {p.ticket}: {err}")
-        return success
+            candidate_fillings = [mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
+
+        # Retry loop (up to 4 attempts with fresh tick prices and adaptive deviation)
+        max_attempts = 4
+        base_deviation = 50
+        res = None
+
+        for attempt in range(1, max_attempts + 1):
+            tick = mt5.symbol_info_tick(p.symbol)
+            if not tick:
+                await asyncio.sleep(0.1)
+                continue
+
+            price = tick.bid if p.type == mt5.POSITION_TYPE_BUY else tick.ask
+            dev = base_deviation * attempt
+
+            for fill_mode in candidate_fillings:
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "position": p.ticket,
+                    "symbol": p.symbol,
+                    "volume": float(vol),
+                    "type": close_type,
+                    "price": price,
+                    "deviation": dev,
+                    "magic": 2102026,
+                    "comment": "YTC_CLOSE",
+                    "type_filling": fill_mode
+                }
+
+                res = mt5.order_send(request)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    # Post-execution verification
+                    await asyncio.sleep(0.05)
+                    remaining = mt5.positions_get(ticket=p.ticket)
+                    if not remaining or (volume and remaining[0].volume < p.volume):
+                        print(f"[MT5Broker] Successfully closed position {p.ticket} (vol={vol}, attempt={attempt})")
+                        return True
+                    print(f"[MT5Broker] Close executed for position {p.ticket} and verified closed.")
+                    return True
+                elif res and res.retcode == 10030:
+                    # Unsupported filling mode, try next candidate
+                    continue
+                elif res and res.retcode in [10004, 10006, 10015, 10021, 10012]:
+                    # Requote, Price Off, Timeout -> break candidate loop to refresh tick price
+                    break
+                else:
+                    break
+
+            await asyncio.sleep(0.1)
+
+        # Final verification: check if position is indeed gone
+        check_pos = mt5.positions_get(ticket=p.ticket)
+        if not check_pos:
+            print(f"[MT5Broker] Verified position {p.ticket} is no longer open in MT5.")
+            return True
+
+        err = res.comment if res else mt5.last_error()
+        print(f"[MT5Broker] Failed to close position {p.ticket} after {max_attempts} attempts: {err}")
+        return False
 
     async def modify_position(self, ticket: int, sl: float, tp: float) -> bool:
         if not self.connected:
@@ -341,3 +415,66 @@ class MT5Broker(IBrokerGateway):
             "account_name": acc_info.name if acc_info else None,
             "message": message
         }
+
+    async def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get live positions directly from MT5 Terminal."""
+        if not self.connected or not MT5_AVAILABLE:
+            return []
+        try:
+            kwargs = {}
+            if symbol:
+                kwargs["symbol"] = symbol
+            raw_pos = mt5.positions_get(**kwargs)
+            if not raw_pos:
+                return []
+            positions = []
+            for p in raw_pos:
+                positions.append({
+                    "ticket": p.ticket,
+                    "identifier": getattr(p, "identifier", p.ticket),
+                    "symbol": p.symbol,
+                    "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                    "volume": float(p.volume),
+                    "price_open": float(p.price_open),
+                    "sl": float(p.sl),
+                    "tp": float(p.tp),
+                    "price_current": float(p.price_current),
+                    "profit": float(p.profit),
+                    "magic": int(p.magic),
+                    "comment": p.comment,
+                    "time": int(p.time)
+                })
+            return positions
+        except Exception as e:
+            print(f"[MT5Broker] Error fetching open positions: {e}")
+            return []
+
+    async def get_pending_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get live pending orders directly from MT5 Terminal."""
+        if not self.connected or not MT5_AVAILABLE:
+            return []
+        try:
+            kwargs = {}
+            if symbol:
+                kwargs["symbol"] = symbol
+            raw_orders = mt5.orders_get(**kwargs)
+            if not raw_orders:
+                return []
+            orders = []
+            for o in raw_orders:
+                orders.append({
+                    "ticket": o.ticket,
+                    "symbol": o.symbol,
+                    "type": o.type,
+                    "volume": float(o.volume_current),
+                    "price_open": float(o.price_open),
+                    "sl": float(o.sl),
+                    "tp": float(o.tp),
+                    "magic": int(o.magic),
+                    "comment": o.comment,
+                    "time_setup": int(o.time_setup)
+                })
+            return orders
+        except Exception as e:
+            print(f"[MT5Broker] Error fetching pending orders: {e}")
+            return []

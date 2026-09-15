@@ -149,31 +149,49 @@ class ManageLifecycleUseCase:
             sl_hit = True
 
         if sl_hit:
-            trade.state = PositionState.STOPPED_OUT
-            trade.close_time = time.time()
-            trade.part1.is_closed = True
-            trade.part1.close_price = trade.part1.sl_price
-            trade.part2.is_closed = True
-            trade.part2.close_price = trade.part1.sl_price
-            trade.close_context = {
-                "close_state": "STOPPED_OUT",
-                "close_reason": "INITIAL_STOP_LOSS_HIT",
-                "exit_price_part1": trade.part1.close_price,
-                "exit_price_part2": trade.part2.close_price,
-                "bars_in_trade": trade.m1_bars_in_trade,
-                "close_time": trade.close_time,
-                "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
-            }
-            if trade.part1.ticket:
-                await self.broker.close_position(trade.part1.ticket)
-            if trade.part2.ticket:
-                await self.broker.close_position(trade.part2.ticket)
-            await self.event_bus.publish("telemetry", {
-                "type": "STOP_LOSS_HIT",
-                "trade_id": trade.trade_id,
-                "price": curr_price
-            })
-            return trade
+            closed_tickets = set()
+            tickets_to_close = []
+            if trade.part1.ticket and not trade.part1.is_closed:
+                tickets_to_close.append(trade.part1.ticket)
+            if trade.part2.ticket and not trade.part2.is_closed:
+                if trade.part2.ticket not in tickets_to_close:
+                    tickets_to_close.append(trade.part2.ticket)
+
+            for tkt in tickets_to_close:
+                ok = await self.broker.close_position(tkt)
+                if ok:
+                    closed_tickets.add(tkt)
+
+            if trade.part1.ticket in closed_tickets:
+                trade.part1.is_closed = True
+                trade.part1.close_price = trade.part1.sl_price
+                if trade.part2.ticket == trade.part1.ticket:
+                    trade.part2.is_closed = True
+                    trade.part2.close_price = trade.part1.sl_price
+            if trade.part2.ticket in closed_tickets:
+                trade.part2.is_closed = True
+                trade.part2.close_price = trade.part1.sl_price
+
+            if trade.part1.is_closed and trade.part2.is_closed:
+                trade.state = PositionState.STOPPED_OUT
+                trade.close_time = time.time()
+                trade.close_context = {
+                    "close_state": "STOPPED_OUT",
+                    "close_reason": "INITIAL_STOP_LOSS_HIT",
+                    "exit_price_part1": trade.part1.close_price,
+                    "exit_price_part2": trade.part2.close_price,
+                    "bars_in_trade": trade.m1_bars_in_trade,
+                    "close_time": trade.close_time,
+                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                }
+                await self.event_bus.publish("telemetry", {
+                    "type": "STOP_LOSS_HIT",
+                    "trade_id": trade.trade_id,
+                    "price": curr_price
+                })
+            else:
+                print(f"[ENGINE WARNING] STOP_LOSS_HIT {trade.trade_id} failed to close on MT5. Will retry on next tick!")
+                return trade
 
         # Check T1 HIT Event
         t1_hit = False
@@ -184,27 +202,32 @@ class ManageLifecycleUseCase:
 
         if t1_hit and trade.state == PositionState.IN_POSITION:
             # Liquidate Part 1
-            trade.part1.is_closed = True
-            trade.part1.close_price = trade.part1.tp_price
-            if trade.part1.ticket:
-                await self.broker.close_position(trade.part1.ticket, trade.part1.lot_size)
+            if trade.part1.ticket and not trade.part1.is_closed:
+                ok = await self.broker.close_position(trade.part1.ticket, trade.part1.lot_size)
+                if ok:
+                    trade.part1.is_closed = True
+                    trade.part1.close_price = trade.part1.tp_price
+            else:
+                trade.part1.is_closed = True
+                trade.part1.close_price = trade.part1.tp_price
 
-            # Modify Part 2 SL to Breakeven (+/- be_buffer depending on instrument)
-            from core.domain.models import get_instrument_profile
-            profile = get_instrument_profile(trade.symbol)
-            be_buffer = profile.be_buffer_points
-            new_sl = (trade.part2.entry_price + be_buffer) if trade.side == OrderSide.BUY else (trade.part2.entry_price - be_buffer)
-            trade.part2.sl_price = round(new_sl, profile.digits)
+            if trade.part1.is_closed:
+                # Modify Part 2 SL to Breakeven (+/- be_buffer depending on instrument)
+                from core.domain.models import get_instrument_profile
+                profile = get_instrument_profile(trade.symbol)
+                be_buffer = profile.be_buffer_points
+                new_sl = (trade.part2.entry_price + be_buffer) if trade.side == OrderSide.BUY else (trade.part2.entry_price - be_buffer)
+                trade.part2.sl_price = round(new_sl, profile.digits)
 
-            if trade.part2.ticket:
-                await self.broker.modify_position(trade.part2.ticket, sl=trade.part2.sl_price, tp=trade.part2.tp_price)
+                if trade.part2.ticket:
+                    await self.broker.modify_position(trade.part2.ticket, sl=trade.part2.sl_price, tp=trade.part2.tp_price)
 
-            trade.state = PositionState.TRAILING_STOP
-            await self.event_bus.publish("telemetry", {
-                "type": "T1_HIT",
-                "trade_id": trade.trade_id,
-                "new_sl": trade.part2.sl_price
-            })
+                trade.state = PositionState.TRAILING_STOP
+                await self.event_bus.publish("telemetry", {
+                    "type": "T1_HIT",
+                    "trade_id": trade.trade_id,
+                    "new_sl": trade.part2.sl_price
+                })
             return trade
 
         # 3. Check Scratch Rule (Premise Threatened)
@@ -249,31 +272,57 @@ class ManageLifecycleUseCase:
                 m3_structure_broken=m3_structure_broken
             )
             if is_scratch:
-                trade.state = PositionState.SCRATCHED
-                trade.close_time = time.time()
-                trade.part1.is_closed = True
-                trade.part1.close_price = curr_price
-                trade.part2.is_closed = True
-                trade.part2.close_price = curr_price
-                trade.close_context = {
-                    "close_state": "SCRATCHED",
-                    "close_reason": scratch_reason,
-                    "exit_price_part1": curr_price,
-                    "exit_price_part2": curr_price,
-                    "bars_in_trade": trade.m1_bars_in_trade,
-                    "close_time": trade.close_time,
-                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
-                }
+                closed_tickets = set()
+                tickets_to_close = []
                 if trade.part1.ticket and not trade.part1.is_closed:
-                    await self.broker.close_position(trade.part1.ticket)
+                    tickets_to_close.append(trade.part1.ticket)
                 if trade.part2.ticket and not trade.part2.is_closed:
-                    await self.broker.close_position(trade.part2.ticket)
-                await self.event_bus.publish("telemetry", {
-                    "type": "SCRATCH_TRIGGERED",
-                    "trade_id": trade.trade_id,
-                    "reason": scratch_reason
-                })
-                return trade
+                    if trade.part2.ticket not in tickets_to_close:
+                        tickets_to_close.append(trade.part2.ticket)
+
+                for tkt in tickets_to_close:
+                    ok = await self.broker.close_position(tkt)
+                    if ok:
+                        closed_tickets.add(tkt)
+
+                if trade.part1.ticket in closed_tickets:
+                    trade.part1.is_closed = True
+                    trade.part1.close_price = curr_price
+                    if trade.part2.ticket == trade.part1.ticket:
+                        trade.part2.is_closed = True
+                        trade.part2.close_price = curr_price
+                if trade.part2.ticket in closed_tickets:
+                    trade.part2.is_closed = True
+                    trade.part2.close_price = curr_price
+
+                # Check if all remaining parts are now closed
+                if trade.part1.is_closed and trade.part2.is_closed:
+                    trade.state = PositionState.SCRATCHED
+                    trade.close_time = time.time()
+                    trade.close_context = {
+                        "close_state": "SCRATCHED",
+                        "close_reason": scratch_reason,
+                        "exit_price_part1": curr_price,
+                        "exit_price_part2": curr_price,
+                        "bars_in_trade": trade.m1_bars_in_trade,
+                        "close_time": trade.close_time,
+                        "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                    }
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SCRATCH_TRIGGERED",
+                        "trade_id": trade.trade_id,
+                        "reason": scratch_reason
+                    })
+                    print(f"[ENGINE] Trade Scratched & Confirmed Closed on MT5: {trade.trade_id} ({scratch_reason})")
+                    return trade
+                else:
+                    print(f"[ENGINE WARNING] Scratch close for {trade.trade_id} failed on MT5 (Will retry next tick). Reason: {scratch_reason}")
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SCRATCH_RETRY_PENDING",
+                        "trade_id": trade.trade_id,
+                        "reason": scratch_reason
+                    })
+                    return trade
 
         # 4. State: TRAILING_STOP (Part 2)
         if trade.state == PositionState.TRAILING_STOP:
@@ -285,26 +334,31 @@ class ManageLifecycleUseCase:
                 part2_sl_hit = True
 
             if part2_sl_hit:
-                trade.state = PositionState.FULLY_CLOSED
-                trade.close_time = time.time()
-                trade.part2.is_closed = True
-                trade.part2.close_price = trade.part2.sl_price
-                if trade.part2.ticket:
-                    await self.broker.close_position(trade.part2.ticket)
-                trade.close_context = {
-                    "close_state": "FULLY_CLOSED",
-                    "close_reason": "PART2_TRAILING_SL_HIT_AFTER_T1",
-                    "exit_price_part1": trade.part1.close_price,
-                    "exit_price_part2": trade.part2.close_price,
-                    "bars_in_trade": trade.m1_bars_in_trade,
-                    "close_time": trade.close_time,
-                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
-                }
-                await self.event_bus.publish("telemetry", {
-                    "type": "PART2_BE_HIT_FULLY_CLOSED",
-                    "trade_id": trade.trade_id
-                })
-                return trade
+                ok = True
+                if trade.part2.ticket and not trade.part2.is_closed:
+                    ok = await self.broker.close_position(trade.part2.ticket)
+                if ok:
+                    trade.state = PositionState.FULLY_CLOSED
+                    trade.close_time = time.time()
+                    trade.part2.is_closed = True
+                    trade.part2.close_price = trade.part2.sl_price
+                    trade.close_context = {
+                        "close_state": "FULLY_CLOSED",
+                        "close_reason": "PART2_TRAILING_SL_HIT_AFTER_T1",
+                        "exit_price_part1": trade.part1.close_price,
+                        "exit_price_part2": trade.part2.close_price,
+                        "bars_in_trade": trade.m1_bars_in_trade,
+                        "close_time": trade.close_time,
+                        "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                    }
+                    await self.event_bus.publish("telemetry", {
+                        "type": "PART2_BE_HIT_FULLY_CLOSED",
+                        "trade_id": trade.trade_id
+                    })
+                    return trade
+                else:
+                    print(f"[ENGINE WARNING] PART2_TRAILING_SL_HIT {trade.trade_id} failed to close on MT5. Will retry!")
+                    return trade
 
             # Check T2 Target Hit
             t2_hit = False
@@ -314,26 +368,31 @@ class ManageLifecycleUseCase:
                 t2_hit = True
 
             if t2_hit:
-                trade.state = PositionState.FULLY_CLOSED
-                trade.close_time = time.time()
-                trade.part2.is_closed = True
-                trade.part2.close_price = trade.part2.tp_price
-                trade.close_context = {
-                    "close_state": "FULLY_CLOSED",
-                    "close_reason": "T2_TARGET_HIT",
-                    "exit_price_part1": trade.part1.close_price,
-                    "exit_price_part2": trade.part2.close_price,
-                    "bars_in_trade": trade.m1_bars_in_trade,
-                    "close_time": trade.close_time,
-                    "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
-                }
-                if trade.part2.ticket:
-                    await self.broker.close_position(trade.part2.ticket)
-                await self.event_bus.publish("telemetry", {
-                    "type": "T2_HIT_FULLY_CLOSED",
-                    "trade_id": trade.trade_id
-                })
-                return trade
+                ok = True
+                if trade.part2.ticket and not trade.part2.is_closed:
+                    ok = await self.broker.close_position(trade.part2.ticket)
+                if ok:
+                    trade.state = PositionState.FULLY_CLOSED
+                    trade.close_time = time.time()
+                    trade.part2.is_closed = True
+                    trade.part2.close_price = trade.part2.tp_price
+                    trade.close_context = {
+                        "close_state": "FULLY_CLOSED",
+                        "close_reason": "T2_TARGET_HIT",
+                        "exit_price_part1": trade.part1.close_price,
+                        "exit_price_part2": trade.part2.close_price,
+                        "bars_in_trade": trade.m1_bars_in_trade,
+                        "close_time": trade.close_time,
+                        "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                    }
+                    await self.event_bus.publish("telemetry", {
+                        "type": "T2_HIT_FULLY_CLOSED",
+                        "trade_id": trade.trade_id
+                    })
+                    return trade
+                else:
+                    print(f"[ENGINE WARNING] T2_HIT {trade.trade_id} failed to close on MT5. Will retry!")
+                    return trade
 
             # Trailing stop update on newly confirmed TTF (3m) swing node
             swings_3m = SwingDetector.detect_swings(bars_m3)

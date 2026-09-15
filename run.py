@@ -42,6 +42,7 @@ from core.use_cases.execution.manage_lifecycle import ManageLifecycleUseCase
 from core.use_cases.execution.circuit_breaker import CircuitBreakerUseCase
 from core.use_cases.intelligence.pre_session_planner import PreSessionPlannerUseCase
 from core.use_cases.intelligence.hindsight_auditor import HindsightAuditorUseCase
+from core.use_cases.intelligence.post_trade_evaluator import PostTradeEvaluatorUseCase
 from core.domain.rules.candlestick_engine import CandlestickEngine
 
 from infrastructure.bus.async_event_bus import AsyncEventBus
@@ -77,6 +78,15 @@ class SystemOrchestrator:
         self.vector_store = MemoryVectorStore()
         self.json_store = LocalJsonStore(os.path.join(BASE_DIR, "data"))
 
+        # Load persisted session lessons into Vector Store
+        try:
+            persisted_lessons = self.json_store.load_session_lessons()
+            if persisted_lessons:
+                self.vector_store.load_persisted_lessons(persisted_lessons)
+                print(f"[INIT] Loaded {len(persisted_lessons)} historical session lessons into Vector Store.")
+        except Exception as e:
+            print(f"[INIT] Warning: Could not load historical session lessons: {e}")
+
         # Broker selection (Port & Adapter)
         if mode == "live":
             print("[INIT] Initializing Live MetaTrader 5 Gateway...")
@@ -110,12 +120,23 @@ class SystemOrchestrator:
         # 2. Dependency Injection: Use Cases
         from core.domain.rules.session_manager import SessionManager
         self.session_manager = SessionManager(enabled=True)
-        self.evaluate_entry = EvaluateEntryUseCase(self.broker, self.event_bus, ai_engine=self.ai_engine)
+        self.evaluate_entry = EvaluateEntryUseCase(
+            self.broker,
+            self.event_bus,
+            ai_engine=self.ai_engine,
+            vector_store=self.vector_store
+        )
         self.evaluate_entry.session_manager = self.session_manager
         self.manage_lifecycle = ManageLifecycleUseCase(self.broker, self.event_bus)
         self.circuit_breaker = CircuitBreakerUseCase(self.broker, self.event_bus)
         self.pre_planner = PreSessionPlannerUseCase(self.ai_engine, self.vector_store, self.broker)
         self.auditor = HindsightAuditorUseCase(self.ai_engine, self.vector_store)
+        self.post_trade_evaluator = PostTradeEvaluatorUseCase(
+            ai_engine=self.ai_engine,
+            vector_store=self.vector_store,
+            json_store=self.json_store,
+            event_bus=self.event_bus
+        )
 
         # 3. Presentation FastAPI Apps
         self.server_a_app = create_server_a_app(
@@ -123,7 +144,8 @@ class SystemOrchestrator:
             event_bus=self.event_bus,
             circuit_breaker=self.circuit_breaker,
             state_ref=self.state,
-            json_store=self.json_store
+            json_store=self.json_store,
+            evaluate_entry=self.evaluate_entry
         )
 
         self.server_b_app = create_server_b_app(
@@ -134,6 +156,111 @@ class SystemOrchestrator:
             active_env_file=self.active_env_file,
             evaluate_entry=self.evaluate_entry
         )
+        self._last_reconcile_time = 0.0
+
+    async def reconcile_positions_watchdog(self):
+        """
+        Active Reconciliation Engine:
+        Periodically aligns Server A state with live MT5 Terminal positions/orders.
+        1. Detects & liquidates orphan MT5 positions (e.g. from failed scratches or ghost orders).
+        2. Detects external SL/TP hit on MT5 and synchronizes Server A trade state.
+        3. Detects pending orders filled on MT5 and transitions trade to IN_POSITION.
+        """
+        now = time.time()
+        if now - getattr(self, "_last_reconcile_time", 0.0) < 3.0:
+            return
+        self._last_reconcile_time = now
+
+        try:
+            status = await self.broker.get_terminal_status()
+            if not status.get("connected"):
+                return
+
+            open_positions = await self.broker.get_open_positions(self.symbol)
+            active_trades: List[TradeLifecycle] = self.state["active_trades"]
+
+            # Map active trade tickets
+            active_tickets = set()
+            for t in active_trades:
+                if t.part1 and t.part1.ticket:
+                    active_tickets.add(t.part1.ticket)
+                if t.part2 and t.part2.ticket:
+                    active_tickets.add(t.part2.ticket)
+                if getattr(t, "limit_order_ticket", None):
+                    active_tickets.add(t.limit_order_ticket)
+                if getattr(t, "stop_order_ticket", None):
+                    active_tickets.add(t.stop_order_ticket)
+
+            # Check 1: Orphan positions in MT5 (belonging to our system's magic 2102026)
+            for pos in open_positions:
+                pos_ticket = pos["ticket"]
+                pos_ident = pos.get("identifier", pos_ticket)
+                pos_magic = pos.get("magic", 0)
+
+                # Only monitor our system's trades
+                if pos_magic != 2102026:
+                    continue
+
+                is_known = (pos_ticket in active_tickets) or (pos_ident in active_tickets)
+                if not is_known:
+                    print(f"\n[RECONCILIATION WARNING: ORPHAN MT5 POSITION DETECTED]")
+                    print(f"  MT5 Position #{pos_ticket} ({pos['symbol']} {pos['type']} {pos['volume']} lot) has no matching active trade on server!")
+                    print(f"  -> Liquidating orphan MT5 position #{pos_ticket} immediately...")
+
+                    closed_ok = await self.broker.close_position(pos_ticket)
+                    if closed_ok:
+                        print(f"  [RECONCILIATION] Successfully liquidated orphan MT5 position #{pos_ticket}!\n")
+                        await self.event_bus.publish("emergency", {
+                            "action": "ORPHAN_POSITION_LIQUIDATED",
+                            "ticket": pos_ticket,
+                            "symbol": pos["symbol"],
+                            "volume": pos["volume"]
+                        })
+                    else:
+                        print(f"  [RECONCILIATION ERROR] Failed to close orphan position #{pos_ticket} on MT5!\n")
+
+            # Check 2: Pending trades filled in MT5
+            for trade in active_trades:
+                if trade.state == PositionState.PENDING_ENTRY:
+                    found_pos = None
+                    for pos in open_positions:
+                        if pos["ticket"] in (trade.part1.ticket, trade.part2.ticket, trade.limit_order_ticket, trade.stop_order_ticket) or \
+                           pos.get("identifier") in (trade.part1.ticket, trade.part2.ticket, trade.limit_order_ticket, trade.stop_order_ticket):
+                            found_pos = pos
+                            break
+                    if found_pos:
+                        trade.state = PositionState.IN_POSITION
+                        trade.m1_bars_in_trade = 0
+                        trade.open_time = time.time()
+                        print(f"[RECONCILIATION] Pending trade {trade.trade_id} was filled in MT5 (Ticket: {found_pos['ticket']})!")
+                        await self.event_bus.publish("telemetry", {
+                            "type": "ORDER_FILLED_EXTERNAL",
+                            "trade_id": trade.trade_id,
+                            "ticket": found_pos["ticket"]
+                        })
+
+            # Check 3: Active trades externally closed by MT5 (e.g. SL/TP hit directly on MT5)
+            open_tickets_set = {p["ticket"] for p in open_positions} | {p.get("identifier") for p in open_positions}
+            for trade in list(active_trades):
+                if trade.state in [PositionState.IN_POSITION, PositionState.TRAILING_STOP]:
+                    p1_ticket = trade.part1.ticket if trade.part1 else None
+                    p2_ticket = trade.part2.ticket if trade.part2 else None
+                    
+                    has_open = (p1_ticket and p1_ticket in open_tickets_set) or (p2_ticket and p2_ticket in open_tickets_set)
+                    if not has_open and (p1_ticket or p2_ticket):
+                        trade.part1.is_closed = True
+                        trade.part2.is_closed = True
+                        trade.state = PositionState.FULLY_CLOSED
+                        trade.close_time = time.time()
+                        trade.close_context = {
+                            "close_state": "FULLY_CLOSED",
+                            "close_reason": "EXTERNAL_MT5_SLTP_CLOSED",
+                            "close_time": trade.close_time,
+                            "close_time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trade.close_time))
+                        }
+                        print(f"[RECONCILIATION] Trade {trade.trade_id} (Ticket {p1_ticket}) was closed externally in MT5. State synchronized to FULLY_CLOSED.")
+        except Exception as rec_err:
+            print(f"[RECONCILIATION ERROR] Position reconciliation error: {rec_err}")
 
     async def _trigger_async_replan(self, session_cfg: SessionConfig, reason: str):
         """Tier 2 Async AI Re-Plan: Runs in background without blocking Server A execution."""
@@ -154,6 +281,7 @@ class SystemOrchestrator:
                 "setups_enabled": new_plan.setups_enabled,
                 "session_tag": new_plan.session_tag
             }
+            self.evaluate_entry.reset_session()
             await self.event_bus.publish("telemetry", {
                 "type": "SESSION_PLAN_RELOADED",
                 "session_tag": new_plan.session_tag,
@@ -197,6 +325,7 @@ class SystemOrchestrator:
                         }
                         session_cfg = new_plan
                         self.session_manager.mark_replan_completed(session_status.session_tag)
+                        self.evaluate_entry.reset_session()
                         await self.event_bus.publish("telemetry", {
                             "type": "SESSION_PLAN_RELOADED",
                             "session_tag": session_status.session_tag,
@@ -234,6 +363,9 @@ class SystemOrchestrator:
                         "m30": {"time": int(latest_m30.timestamp), "open": latest_m30.open, "high": latest_m30.high, "low": latest_m30.low, "close": latest_m30.close} if latest_m30 else None,
                     })
 
+                # 1.5 Active MT5 Position & Order Reconciliation Watchdog
+                await self.reconcile_positions_watchdog()
+
                 # 2. Update active trades lifecycle
                 active_trades: List[TradeLifecycle] = self.state["active_trades"]
 
@@ -244,6 +376,19 @@ class SystemOrchestrator:
                         if trade in active_trades:
                             active_trades.remove(trade)
                         self.state["closed_trades"].append(trade)
+
+                        # Closed-Loop Learning: Evaluate trade outcome & extract session experience
+                        try:
+                            reflection = await self.post_trade_evaluator.evaluate_and_learn(
+                                trade=trade,
+                                session_cfg=session_cfg,
+                                recent_m1=m1_bars,
+                                recent_m3=m3_bars
+                            )
+                            trade.reflection = reflection
+                        except Exception as eval_err:
+                            print(f"[ENGINE] Post-trade evaluation error: {eval_err}")
+
                         try:
                             from presentation.api.server_a_api import serialize_trade
                             serialized_closed = [serialize_trade(t) for t in self.state["closed_trades"]]
@@ -253,9 +398,10 @@ class SystemOrchestrator:
                         await self.event_bus.publish("trade_closed", {
                             "trade_id": trade.trade_id,
                             "state": trade.state.value,
-                            "close_context": getattr(trade, "close_context", {})
+                            "close_context": getattr(trade, "close_context", {}),
+                            "reflection": getattr(trade, "reflection", None)
                         })
-                        print(f"[ENGINE] Trade Finalized: {trade.trade_id} [{trade.state.value}]. Post-Trade Cooldown Active.")
+                        print(f"[ENGINE] Trade Finalized: {trade.trade_id} [{trade.state.value}]. Post-Trade reflection saved.")
 
                 # 3. Zone Monitor & S/R Role Reversal (Tier 1 Local Reflex & Tier 2 AI Trigger)
                 from core.domain.rules.zone_monitor import ZoneMonitor
@@ -320,19 +466,29 @@ class SystemOrchestrator:
                     dist_sup = abs(curr_p - nearest_sup.high) if nearest_sup else 9999
                     dist_res = abs(curr_p - nearest_res.low) if nearest_res else 9999
 
-                    # Auto-heal: If plan zones are >10% away from live market, re-generate plan from live rates
-                    if (dist_sup > curr_p * 0.10) and (dist_res > curr_p * 0.10):
+                    from core.domain.models import get_instrument_profile
+                    profile = get_instrument_profile(self.symbol)
+
+                    # Auto-heal: If plan zones drifted too far from live market, re-generate plan from live rates
+                    max_allowed_zone_dist = max(profile.sr_proximity_points * 6.0, curr_p * 0.012)
+                    if (dist_sup > max_allowed_zone_dist) and (dist_res > max_allowed_zone_dist):
+                        print(f"[ZONE_AUTO_HEAL] Market price {curr_p} drifted {min(dist_sup, dist_res):.2f} pts away from plan zones (> {max_allowed_zone_dist:.2f} pts limit). Auto-healing plan...")
                         session_cfg = await self.pre_planner.execute(self.symbol, [])
                         self.state["session_config_obj"] = session_cfg
+                        self.state["session_config"] = {
+                            "session_id": session_cfg.session_id,
+                            "symbol": session_cfg.symbol,
+                            "market_regime": session_cfg.market_regime.value,
+                            "setups_enabled": session_cfg.setups_enabled,
+                            "session_tag": session_cfg.session_tag
+                        }
+                        self.evaluate_entry.reset_session()
                         sups = session_cfg.support_zones
                         reses = session_cfg.resistance_zones
                         nearest_sup = min(sups, key=lambda s: abs(curr_p - s.high)) if sups else None
                         nearest_res = min(reses, key=lambda r: abs(curr_p - r.low)) if reses else None
                         dist_sup = abs(curr_p - nearest_sup.high) if nearest_sup else 9999
                         dist_res = abs(curr_p - nearest_res.low) if nearest_res else 9999
-
-                    from core.domain.models import get_instrument_profile
-                    profile = get_instrument_profile(self.symbol)
 
 
                     if dist_sup <= dist_res and nearest_sup:
@@ -437,6 +593,7 @@ class SystemOrchestrator:
             status = self.session_manager.get_session_status()
             plan = await self.pre_planner.execute(self.symbol, [], session_tag=status.session_tag)
             self.session_manager.mark_replan_completed(status.session_tag)
+            self.evaluate_entry.reset_session()
             self.state["session_config_obj"] = plan
             self.state["session_config"] = {
                 "session_id": plan.session_id,

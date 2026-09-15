@@ -28,8 +28,8 @@ class PreSessionPlannerUseCase:
         m3_bars = await self.broker.get_latest_bars(symbol, "M3", count=100)
 
         rates_json = {
-            "M30": [{"time": b.timestamp, "o": b.open, "h": b.high, "l": b.low, "c": b.close} for b in m30_bars[-20:]],
-            "M3": [{"time": b.timestamp, "o": b.open, "h": b.high, "l": b.low, "c": b.close} for b in m3_bars[-30:]]
+            "M30": [{"time": b.timestamp, "o": b.open, "h": b.high, "l": b.low, "c": b.close} for b in m30_bars],
+            "M3": [{"time": b.timestamp, "o": b.open, "h": b.high, "l": b.low, "c": b.close} for b in m3_bars]
         }
 
         # Retrieve relevant RAG lessons from memory

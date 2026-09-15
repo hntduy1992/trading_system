@@ -3,7 +3,7 @@ Vector Store Implementation (In-memory + Cosine Similarity & Persistence)
 Implements IVectorStore without requiring external heavy service
 """
 import math
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from core.domain.interfaces.vector_store import IVectorStore
 
 class MemoryVectorStore(IVectorStore):
@@ -30,7 +30,20 @@ class MemoryVectorStore(IVectorStore):
             "metadata": metadata
         })
 
-    async def search_lessons(self, query: str, regime: str, limit: int = 5) -> List[str]:
+    def load_persisted_lessons(self, lessons: List[Dict[str, Any]]) -> None:
+        """Loads historical lessons from disk persistence into memory."""
+        for item in lessons:
+            text = item.get("text") or item.get("lesson", "")
+            meta = item.get("metadata") or item
+            if text:
+                vec = self._simple_vectorize(text)
+                self._documents.append({
+                    "text": text,
+                    "vector": vec,
+                    "metadata": meta
+                })
+
+    async def search_lessons(self, query: str, regime: str, limit: int = 5, session_tag: Optional[str] = None) -> List[str]:
         if not self._documents:
             return [
                 "Always wait for confirmation of stall before wholesale entry.",
@@ -42,6 +55,9 @@ class MemoryVectorStore(IVectorStore):
         scored = []
         for doc in self._documents:
             score = self._cosine_sim(q_vec, doc["vector"])
+            # Bonus if matching current session
+            if session_tag and doc["metadata"].get("session_tag") == session_tag:
+                score += 0.4
             # Bonus if matching regime
             if doc["metadata"].get("regime") == regime:
                 score += 0.2
@@ -49,3 +65,16 @@ class MemoryVectorStore(IVectorStore):
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item[1] for item in scored[:limit]]
+
+    def get_session_lessons(self, session_tag: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns all documents or documents for a specific session."""
+        if not session_tag:
+            return [
+                {"text": d["text"], **d["metadata"]}
+                for d in self._documents
+            ]
+        return [
+            {"text": d["text"], **d["metadata"]}
+            for d in self._documents
+            if d["metadata"].get("session_tag") == session_tag
+        ]

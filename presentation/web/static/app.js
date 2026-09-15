@@ -630,6 +630,21 @@ async function fetchTradeHistory() {
         const regimeStr = eCtx.market_regime ? `<br><small style="color:#8b949e;">${eCtx.market_regime}</small>` : '';
         const exitReason = cCtx.close_reason || t.state;
 
+        const refl = t.reflection || {};
+        let reflRatingHtml = '';
+        if (refl.rating) {
+          reflRatingHtml = `<div style="margin-top:2px; font-size:10px; color:#58a6ff;">[${refl.rating}]</div>`;
+        }
+        let reflHtml = '';
+        if (refl.lesson) {
+          reflHtml = `
+            <div style="margin-top:4px; font-size:11px; background:#161b22; border-left:3px solid #58a6ff; padding:3px 6px; border-radius:2px; color:#c9d1d9; line-height:1.3;">
+              <span style="color:#58a6ff; font-weight:bold;">💡 Kinh nghiệm:</span> ${refl.lesson}
+              ${refl.recommendation ? `<br><span style="color:#e3b341; font-weight:bold;">🎯 Quy tắc:</span> ${refl.recommendation}` : ''}
+            </div>
+          `;
+        }
+
         return `
           <tr>
             <td><code>${t.trade_id}</code></td>
@@ -639,8 +654,11 @@ async function fetchTradeHistory() {
             <td>${entryPrice}</td>
             <td><span style="color:#f85149;">${slPrice}</span> / <span style="color:#3fb950;">${tpPrice}</span></td>
             <td style="font-size:11px; color:#8b949e;">${wsText}</td>
-            <td>${stateBadge}</td>
-            <td style="font-size:11px; color:#e3b341;">${exitReason}</td>
+            <td>${stateBadge} ${reflRatingHtml}</td>
+            <td>
+              <div style="font-size:11px; color:#e3b341;">${exitReason}</div>
+              ${reflHtml}
+            </td>
           </tr>
         `;
       }).reverse().join("");

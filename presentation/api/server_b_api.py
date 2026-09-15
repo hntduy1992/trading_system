@@ -321,6 +321,19 @@ def create_server_b_app(
         lessons = await vector_store.search_lessons(query=query, regime=regime, limit=limit)
         return {"lessons": lessons}
 
+    @app.get("/api/session/lessons")
+    async def get_session_lessons(session_tag: Optional[str] = None):
+        """Returns structured session lessons recorded by post-trade evaluations."""
+        if hasattr(vector_store, "get_session_lessons"):
+            lessons = vector_store.get_session_lessons(session_tag)
+            return {"status": "SUCCESS", "lessons": lessons, "count": len(lessons)}
+        elif json_store and hasattr(json_store, "load_session_lessons"):
+            lessons = json_store.load_session_lessons()
+            if session_tag:
+                lessons = [l for l in lessons if l.get("session_tag") == session_tag]
+            return {"status": "SUCCESS", "lessons": lessons, "count": len(lessons)}
+        return {"status": "SUCCESS", "lessons": [], "count": 0}
+
     # =========================================================================
     # GOLD MACRO NEWS & BLACKOUT ENGINE ENDPOINTS
     # =========================================================================

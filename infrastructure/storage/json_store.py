@@ -35,3 +35,16 @@ class LocalJsonStore:
             return []
         with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
+
+    def save_session_lessons(self, lessons: List[Dict[str, Any]], filename: str = "session_lessons.json") -> str:
+        filepath = os.path.join(self.data_dir, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(lessons, f, indent=2, ensure_ascii=False)
+        return filepath
+
+    def load_session_lessons(self, filename: str = "session_lessons.json") -> List[Dict[str, Any]]:
+        filepath = os.path.join(self.data_dir, filename)
+        if not os.path.exists(filepath):
+            return []
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)

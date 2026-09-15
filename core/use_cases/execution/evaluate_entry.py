@@ -22,10 +22,11 @@ from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
 
 class EvaluateEntryUseCase:
-    def __init__(self, broker: IBrokerGateway, event_bus: IEventBus, ai_engine: Optional[Any] = None):
+    def __init__(self, broker: IBrokerGateway, event_bus: IEventBus, ai_engine: Optional[Any] = None, vector_store: Optional[Any] = None):
         self.broker = broker
         self.event_bus = event_bus
         self.ai_engine = ai_engine
+        self.vector_store = vector_store
         self.setups = {
             "TST": TSTSetup(),
             "BOF": BOFSetup(),
@@ -84,6 +85,7 @@ class EvaluateEntryUseCase:
         self.last_closed_state = None
         self.consecutive_losses = 0
         self.total_session_trades = 0
+        self._max_trades_alerted = False
 
     async def execute(
         self,
@@ -166,8 +168,16 @@ class EvaluateEntryUseCase:
             return None
 
         # 4. Capital Protection Constraint: Max Session Trades
-        max_session_trades = risk_mgmt.get("max_session_trades", 6)
+        max_session_trades = risk_mgmt.get("max_session_trades", 12)
         if self.total_session_trades >= max_session_trades:
+            if not getattr(self, "_max_trades_alerted", False):
+                self._max_trades_alerted = True
+                await self.event_bus.publish("telemetry", {
+                    "type": "SESSION_MAX_TRADES_REACHED",
+                    "total_session_trades": self.total_session_trades,
+                    "max_session_trades": max_session_trades,
+                    "reason": f"Đã đạt giới hạn số lệnh trong phiên ({self.total_session_trades}/{max_session_trades}). Tạm ngưng vào lệnh mới."
+                })
             return None
 
         # 5. Detect swings and trend on TTF (M3)
@@ -404,6 +414,21 @@ class EvaluateEntryUseCase:
                             for z in (config.resistance_zones + config.support_zones)
                         ]
                     }
+
+                    # Retrieve session lessons to guide AI gatekeeper decision
+                    session_lessons = []
+                    if getattr(self, "vector_store", None):
+                        try:
+                            session_tag = getattr(config, "session_tag", None)
+                            session_lessons = await self.vector_store.search_lessons(
+                                query=f"{setup_name} {side.value} entry in {config.market_regime.value}",
+                                regime=config.market_regime.value,
+                                limit=3,
+                                session_tag=session_tag
+                            )
+                        except Exception as ex:
+                            print(f"[ENGINE] Lesson retrieval warning: {ex}")
+                    candidate_ctx["session_lessons"] = session_lessons
 
                     trading_cfg_dict = {
                         "symbol": config.symbol,

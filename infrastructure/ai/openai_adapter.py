@@ -3,6 +3,7 @@ OpenAI & Compatible API Adapter (GPT-4o, Claude, DeepSeek, etc.)
 """
 import json
 import requests
+import datetime
 from typing import Dict, Any, List
 from core.domain.interfaces.ai_engine import IAIEngine
 from core.domain.models import SessionConfig, AuditReport, MarketRegime, HTFZone, Significance, PreEntryEvaluation

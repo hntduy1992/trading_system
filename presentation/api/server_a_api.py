@@ -64,7 +64,8 @@ def serialize_trade(t: Any) -> Dict[str, Any]:
         "bars_in_trade": t.m1_bars_in_trade,
         "anchor_id": t.anchor_id,
         "entry_context": getattr(t, "entry_context", None) or {},
-        "close_context": getattr(t, "close_context", None) or {}
+        "close_context": getattr(t, "close_context", None) or {},
+        "reflection": getattr(t, "reflection", None) or {}
     }
 
 def create_server_a_app(
@@ -72,7 +73,8 @@ def create_server_a_app(
     event_bus: IEventBus,
     circuit_breaker: CircuitBreakerUseCase,
     state_ref: Dict[str, Any],
-    json_store: Any = None
+    json_store: Any = None,
+    evaluate_entry: Optional[Any] = None
 ) -> FastAPI:
     app = FastAPI(title="Server A - Real-Time Execution Engine", version="2.1.0-STRICT")
 
@@ -420,6 +422,11 @@ def create_server_a_app(
                 "setups_enabled": new_plan.setups_enabled,
                 "session_tag": new_plan.session_tag
             }
+
+            # Reset in-memory session trade limits and anchors for newly deployed plan
+            if evaluate_entry:
+                evaluate_entry.reset_session()
+
             await event_bus.publish("plan_deployed", {
                 "session_id": new_plan.session_id,
                 "market_regime": new_plan.market_regime.value,
@@ -430,6 +437,26 @@ def create_server_a_app(
             return {"status": "SUCCESS", "message": f"Plan {new_plan.session_id} deployed to Server A successfully!"}
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid plan format: {e}")
+
+    @app.post("/api/session/reset")
+    async def reset_session_memory():
+        if evaluate_entry:
+            evaluate_entry.reset_session()
+        await event_bus.publish("telemetry", {
+            "type": "SESSION_MEMORY_RESET",
+            "message": "Bộ nhớ trạng thái phiên (số lệnh, anchors, anti-revenge lock) đã được reset thành công."
+        })
+        return {"status": "SUCCESS", "message": "Session memory reset successfully."}
+
+    @app.get("/api/session/lessons")
+    async def get_session_lessons(session_tag: Optional[str] = None):
+        """Returns structured session lessons recorded by post-trade evaluations."""
+        if json_store and hasattr(json_store, "load_session_lessons"):
+            lessons = json_store.load_session_lessons()
+            if session_tag:
+                lessons = [l for l in lessons if l.get("session_tag") == session_tag]
+            return {"status": "SUCCESS", "lessons": lessons, "count": len(lessons)}
+        return {"status": "SUCCESS", "lessons": [], "count": 0}
 
     @app.websocket("/ws/telemetry")
     async def websocket_telemetry(websocket: WebSocket):

@@ -219,3 +219,21 @@ class PaperBroker(IBrokerGateway):
             "account_name": "Virtual Account",
             "message": "Môi trường giả lập (Paper Trading) luôn sẵn sàng tự động vào lệnh."
         }
+
+    async def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        positions = []
+        for ticket, ord_data in self.orders.items():
+            if symbol and ord_data.get("symbol") != symbol:
+                continue
+            if ord_data.get("type") == "MARKET" or ord_data.get("status") == "FILLED":
+                positions.append(dict(ord_data))
+        return positions
+
+    async def get_pending_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        orders = []
+        for ticket, ord_data in self.orders.items():
+            if symbol and ord_data.get("symbol") != symbol:
+                continue
+            if ord_data.get("type") in ["LIMIT", "STOP"] and ord_data.get("status") == "OPEN":
+                orders.append(dict(ord_data))
+        return orders
