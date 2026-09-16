@@ -20,6 +20,7 @@ class HindsightAuditorUseCase:
     ) -> AuditReport:
         """
         Executes Lance Beggs 4-question audit, calculates compliance score and records lessons.
+        After audit: auto-persists structured_rules to JSON store for Layer 2 scorer next session.
         """
         report = await self.ai_engine.audit_post_session(
             trading_config_used=trading_config_used,
@@ -27,7 +28,7 @@ class HindsightAuditorUseCase:
             full_session_ohlcv=full_session_ohlcv
         )
 
-        # Ingest lessons into vector store
+        # Ingest lessons into vector store (text RAG for pre-session planning)
         regime = trading_config_used.get("market_regime", "GENERAL")
         symbol = trading_config_used.get("symbol", "EURUSD")
         for lesson in report.lessons_learned:
@@ -40,4 +41,33 @@ class HindsightAuditorUseCase:
                 }
             )
 
+        # ── NEW: Persist structured_rules to JSON store for Layer 2 scorer ──
+        # structured_rules có độ chính xác cao hơn text lessons (machine-parseable)
+        if report.structured_rules:
+            try:
+                from infrastructure.storage.json_lesson_rules import JsonLessonRulesStore
+                from core.domain.rules.lessons_compiler import LessonsCompiler
+                rules_store = JsonLessonRulesStore()
+                updated_rules = rules_store.append_from_structured(report.structured_rules)
+                print(
+                    f"[AUDITOR] {len(report.structured_rules)} structured rules persisted. "
+                    f"Total rules in store: {len(updated_rules)}"
+                )
+            except Exception as e:
+                print(f"[AUDITOR] Could not persist structured rules: {e}")
+
+        # Fallback: compile text lessons if no structured_rules returned
+        elif report.lessons_learned:
+            try:
+                from infrastructure.storage.json_lesson_rules import JsonLessonRulesStore
+                from core.domain.rules.lessons_compiler import LessonsCompiler
+                rules_store = JsonLessonRulesStore()
+                updated_rules = rules_store.append_from_lessons(report.lessons_learned)
+                print(
+                    f"[AUDITOR] Compiled {len(updated_rules)} rules from text lessons."
+                )
+            except Exception as e:
+                print(f"[AUDITOR] Could not compile lesson rules: {e}")
+
         return report
+

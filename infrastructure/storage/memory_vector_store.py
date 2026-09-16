@@ -3,12 +3,13 @@ Vector Store Implementation (In-memory + Cosine Similarity & Persistence)
 Implements IVectorStore without requiring external heavy service
 """
 import math
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from core.domain.interfaces.vector_store import IVectorStore
 
 class MemoryVectorStore(IVectorStore):
     def __init__(self):
         self._documents: List[Dict[str, Any]] = []
+        self._lesson_rules_raw: List[Dict[str, Any]] = []  # serialized LessonRule dicts
 
     def _simple_vectorize(self, text: str) -> Dict[str, float]:
         words = text.lower().replace(",", " ").replace(".", " ").split()
@@ -49,3 +50,35 @@ class MemoryVectorStore(IVectorStore):
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item[1] for item in scored[:limit]]
+
+    async def add_lesson_rule(self, rule_dict: Dict[str, Any]) -> None:
+        """Lưu một LessonRule (dạng dict) vào memory store."""
+        source = rule_dict.get("source_lesson", "").strip()
+        # Deduplication theo source_lesson
+        existing = {r.get("source_lesson", "").strip() for r in self._lesson_rules_raw}
+        if source and source not in existing:
+            self._lesson_rules_raw.append(rule_dict)
+
+    async def add_lesson_rules_batch(self, rule_dicts: List[Dict[str, Any]]) -> None:
+        """Batch insert nhiều LessonRule dicts cùng lúc."""
+        for d in rule_dicts:
+            await self.add_lesson_rule(d)
+
+    async def get_lesson_rules(
+        self,
+        setup: Optional[str] = None,
+        regime: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Lấy lesson rules, optionally filter theo setup/regime.
+        Trả về list dicts để caller tự convert sang LessonRule objects.
+        """
+        result = []
+        for r in self._lesson_rules_raw:
+            if setup and r.get("condition_setup") and r["condition_setup"].upper() != setup.upper():
+                continue
+            if regime and r.get("condition_regime") and r["condition_regime"].upper() != regime.upper():
+                continue
+            result.append(r)
+        return result
+

@@ -420,6 +420,38 @@ class MockAIEngine(IAIEngine):
 
         raw_analysis = f"Post-Session Hindsight Audit hoàn tất: {total_trades} lệnh được đánh giá. Điểm tuân thủ: {compliance_score*100:.1f}%. Vi phạm: {len(violations)}."
 
+        # Generate structured_rules from session outcomes (machine-parseable)
+        structured_rules = []
+        if losses > 0:
+            # Các setup bị StopOut trong regime này → penalty
+            for t in session_trades_json:
+                close_ctx = t.get("close_context") or {}
+                entry_ctx = t.get("entry_context") or {}
+                if t.get("state") == "STOPPED_OUT":
+                    s = t.get("setup") or entry_ctx.get("setup")
+                    r = entry_ctx.get("market_regime") or regime
+                    if s:
+                        structured_rules.append({
+                            "condition": {"setup": s, "regime": r, "side": None},
+                            "action": "PENALIZE",
+                            "delta": -0.15,
+                            "reason": f"{s} bị StopOut trong chế độ {r}. Cân nhắc thêm điều kiện lọc."
+                        })
+        if any(v.get("rule") == "WHOLESALE_ENTRY_VIOLATED" for v in violations):
+            structured_rules.append({
+                "condition": {"setup": None, "regime": None, "side": None},
+                "action": "REJECT",
+                "delta": -1.0,
+                "reason": "Tuyệt đối không dùng lệnh Market khi giá vượt LWP. Chỉ đặt Limit tại vùng Wholesale."
+            })
+        if scratches > 2:
+            structured_rules.append({
+                "condition": {"setup": None, "regime": regime, "side": None},
+                "action": "PENALIZE",
+                "delta": -0.10,
+                "reason": f"Tỷ lệ Scratch cao ({scratches}/{total_trades}) trong {regime}. Tránh vào lệnh khi giá giằng co quanh S/R."
+            })
+
         return AuditReport(
             session_id=session_id,
             compliance_score=round(compliance_score, 2),
@@ -429,5 +461,7 @@ class MockAIEngine(IAIEngine):
             parameter_adjustments_suggested=param_adjustments,
             plan_critique=plan_critique,
             trade_evaluations=trade_evaluations,
-            raw_ai_analysis=raw_analysis
+            raw_ai_analysis=raw_analysis,
+            structured_rules=structured_rules
         )
+

@@ -18,8 +18,11 @@ from core.domain.rules.setups.candlestick_setups import (
     TrendBarFailSetup, InsideBarSMA21Setup, IDNR4Setup, NR7EMA20Setup, YumYumSetup
 )
 from core.domain.rules.candlestick_engine import CandlestickEngine
+from core.domain.rules.pre_entry_scorer import PreEntryScorer, DeterministicEvalResult
+from core.domain.rules.lessons_compiler import LessonRule, LessonsCompiler
 from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
+
 
 class EvaluateEntryUseCase:
     def __init__(self, broker: IBrokerGateway, event_bus: IEventBus, ai_engine: Optional[Any] = None):
@@ -48,6 +51,29 @@ class EvaluateEntryUseCase:
         self.zone_scratch_history: Dict[str, List[float]] = {}
         self.consecutive_losses: int = 0
         self.total_session_trades: int = 0
+        # Layer 2: Compiled lesson rules — loaded once at startup, updated after each audit
+        self.compiled_lesson_rules: List[LessonRule] = []
+        self._load_persisted_lesson_rules()
+
+    def _load_persisted_lesson_rules(self) -> None:
+        """Nạp lesson rules đã lưu từ JSON store vào memory — chạy 1 lần khi khởi động."""
+        try:
+            from infrastructure.storage.json_lesson_rules import JsonLessonRulesStore
+            store = JsonLessonRulesStore()
+            self.compiled_lesson_rules = store.load()
+            if self.compiled_lesson_rules:
+                print(f"[ENGINE] Loaded {len(self.compiled_lesson_rules)} lesson rules for Layer 2 gate.")
+        except Exception as e:
+            print(f"[ENGINE] Could not load lesson rules: {e}. Layer 2 will run without lessons.")
+            self.compiled_lesson_rules = []
+
+    def update_lesson_rules(self, lesson_rules: List[LessonRule]) -> None:
+        """
+        Cập nhật lesson rules sau khi audit xong.
+        Gọi từ HindsightAuditorUseCase sau khi nhận AuditReport.
+        """
+        self.compiled_lesson_rules = lesson_rules
+        print(f"[ENGINE] Layer 2 lesson rules updated: {len(lesson_rules)} rules active.")
 
     def record_trade_closed(self, trade: TradeLifecycle, is_loss: Optional[bool] = None):
         """Records closed trade outcome to adjust circuit breaker, dynamic cooldown, and zone scratch tracking."""
@@ -84,6 +110,7 @@ class EvaluateEntryUseCase:
         self.last_closed_state = None
         self.consecutive_losses = 0
         self.total_session_trades = 0
+
 
     async def execute(
         self,
@@ -373,20 +400,60 @@ class EvaluateEntryUseCase:
                 if side == OrderSide.SELL and current_price >= actual_sl:
                     continue
 
-                # 8. Pre-Entry AI Validation Gatekeeper
+                # ================================================================
+                # 8. Pre-Entry Validation: 3-LAYER GATE
+                # ================================================================
                 enable_ai_pre_entry = exec_rules.get("enable_ai_pre_entry", risk_mgmt.get("enable_ai_pre_entry", True))
                 min_ai_confidence = float(exec_rules.get("min_ai_confidence", risk_mgmt.get("min_ai_confidence", 0.65)))
+                layer2_threshold = float(exec_rules.get("layer2_threshold", 0.70))
                 ai_eval = None
 
+                # ------ LAYER 2: Deterministic Scorer (0 tokens) ------
+                det_result = PreEntryScorer.evaluate(
+                    setup=setup_name,
+                    side=side.value,
+                    regime=config.market_regime.value,
+                    wholesale=wholesale.__dict__,
+                    macro_bias=macro_bias,
+                    profile=profile,
+                    lesson_rules=self.compiled_lesson_rules,
+                    threshold=layer2_threshold,
+                )
+
+                score_log = PreEntryScorer.score_summary(det_result)
+                print(f"[LAYER2] {setup_name} {side.value}: {score_log}")
+
+                if not det_result.approved:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "LAYER2_REJECTED",
+                        "setup": setup_name,
+                        "side": side.value,
+                        "price": order_price,
+                        "det_score": det_result.score,
+                        "reason": det_result.rejection_reason,
+                        "triggered_rules": det_result.triggered_lesson_rules,
+                        "message": (
+                            f"⚡ [L2] Từ chối {setup_name} {side.value} (score={det_result.score:.2f}): "
+                            f"{det_result.rejection_reason}"
+                        )
+                    })
+                    continue  # ← Không tốn 1 token AI nào
+
+                # ------ LAYER 3: AI Deep Validation (compact prompt, chỉ khi L2 pass) ------
                 if enable_ai_pre_entry and self.ai_engine:
                     await self.event_bus.publish("telemetry", {
                         "type": "AI_PRE_ENTRY_EVALUATING",
                         "setup": setup_name,
                         "side": side.value,
                         "price": order_price,
-                        "message": f"🤖 AI đang đánh giá điểm vào {setup_name} {side.value} tại {order_price}..."
+                        "det_score": det_result.score,
+                        "message": (
+                            f"🤖 [L3] AI đánh giá {setup_name} {side.value} tại {order_price} "
+                            f"(L2 score={det_result.score:.2f})..."
+                        )
                     })
 
+                    # Compact context — det_score nhúng vào để AI biết bối cảnh
                     candidate_ctx = {
                         "symbol": config.symbol,
                         "setup": setup_name,
@@ -398,7 +465,7 @@ class EvaluateEntryUseCase:
                         "tp2": actual_tp2,
                         "wholesale": wholesale.__dict__,
                         "stall_range": {"low": stall_low, "high": stall_high},
-                        "micro_candle_context": CandlestickEngine.extract_micro_candle_context(bars_m1),
+                        "det_score": round(det_result.score, 3),  # Layer 2 score cho AI tham khảo
                         "nearest_zones": [
                             {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low}
                             for z in (config.resistance_zones + config.support_zones)
@@ -412,8 +479,8 @@ class EvaluateEntryUseCase:
                     }
 
                     recent_snapshot = {
-                        "m1_last_5": [{"time": int(b.timestamp), "open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m1[-5:] if len(bars_m1)>=5 else bars_m1)],
-                        "m3_last_3": [{"time": int(b.timestamp), "open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m3[-3:] if len(bars_m3)>=3 else bars_m3)]
+                        "m1_last_5": [{"open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m1[-5:] if len(bars_m1) >= 5 else bars_m1)],
+                        "m3_last_3": [{"open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m3[-3:] if len(bars_m3) >= 3 else bars_m3)]
                     }
 
                     try:
@@ -444,6 +511,7 @@ class EvaluateEntryUseCase:
                                 "side": side.value,
                                 "price": order_price,
                                 "confidence": ai_eval.confidence,
+                                "det_score": det_result.score,
                                 "reason": ai_eval.reason,
                                 "concerns": ai_eval.concerns,
                                 "message": f"🚫 AI TỪ CHỐI điểm vào {setup_name} {side.value}! Lý do: {ai_eval.reason} (Độ tin cậy: {ai_eval.confidence*100:.0f}%)"
@@ -457,10 +525,13 @@ class EvaluateEntryUseCase:
                                 "side": side.value,
                                 "price": order_price,
                                 "confidence": ai_eval.confidence,
+                                "det_score": det_result.score,
                                 "reason": ai_eval.reason,
                                 "message": f"✅ AI PHÊ DUYỆT điểm vào {setup_name} {side.value}! (Độ tin cậy: {ai_eval.confidence*100:.0f}%) - {ai_eval.reason}"
                             })
                             print(f"[AI_GATEKEEPER] APPROVED entry {setup_name} {side.value} at {order_price} ({ai_eval.confidence*100:.0f}%): {ai_eval.reason}")
+
+
 
                 # Send order to Broker (Live MT5 or Paper)
                 order_ticket = await self.broker.place_order(

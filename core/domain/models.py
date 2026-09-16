@@ -193,6 +193,9 @@ class AuditReport:
     plan_critique: Optional[Dict[str, Any]] = None
     trade_evaluations: List[Dict[str, Any]] = field(default_factory=list)
     raw_ai_analysis: str = ""
+    # Machine-parseable rules compiled from lessons — dùng cho Layer 2 Scorer
+    # Format: [{"condition": {"setup": "PB", "regime": "..."}, "action": "PENALIZE", "delta": -0.25, "reason": "..."}]
+    structured_rules: List[Dict[str, Any]] = field(default_factory=list)
 
 @dataclass
 class PreEntryEvaluation:

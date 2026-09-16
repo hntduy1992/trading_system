@@ -100,48 +100,56 @@ Do not provide prose explanations outside the JSON structure.
         if not self.api_key:
             return await self.fallback.evaluate_candidate_trade(candidate_context, trading_config, recent_bars)
 
-        prompt = f"""
-[SYSTEM INSTRUCTION]
-You are the Senior Price Action Risk Gatekeeper specializing in Lance Beggs YTC Methodology.
-A trade setup trigger has been detected by the deterministic execution engine.
-Evaluate the candidate trade context against current market conditions.
-Decide whether to APPROVE (true) or VETO (false) this trade entry.
+        # --- Compact prompt: Layer 2 đã lọc hard-fail, AI chỉ phán xét pattern nâng cao ---
+        setup = candidate_context.get("setup", "")
+        side = candidate_context.get("side", "")
+        symbol = candidate_context.get("symbol", "")
+        order_price = candidate_context.get("order_price", 0)
+        sl = candidate_context.get("sl", 0)
+        tp1 = candidate_context.get("tp1", 0)
+        tp2 = candidate_context.get("tp2", 0)
+        regime = trading_config.get("market_regime", "")
+        wholesale = candidate_context.get("wholesale") or {}
+        rr = wholesale.get("rr_ratio_part1", 0)
+        stall = candidate_context.get("stall_range") or {}
+        det_score = candidate_context.get("det_score", "N/A")  # Layer 2 score nếu có
 
-[CANDIDATE TRADE CONTEXT]
-- Setup: {candidate_context.get('setup')}
-- Side: {candidate_context.get('side')}
-- Order Type: {candidate_context.get('order_type')}
-- Proposed Entry Price: {candidate_context.get('order_price')}
-- Proposed Stop Loss: {candidate_context.get('sl')}
-- Proposed TP1: {candidate_context.get('tp1')}
-- Proposed TP2: {candidate_context.get('tp2')}
-- Wholesale Calculation: {json.dumps(candidate_context.get('wholesale', {}))}
-- Micro-Stall Range: {json.dumps(candidate_context.get('stall_range', {}))}
-- Nearest HTF S/R Zones: {json.dumps(candidate_context.get('nearest_zones', []))}
+        # Compact bars: chỉ gửi O/H/L/C không timestamp đầy đủ
+        m1 = recent_bars.get("m1_last_5", [])
+        m1_compact = "|".join(
+            f"{b.get('open')}/{b.get('high')}/{b.get('low')}/{b.get('close')}"
+            for b in m1
+        ) if m1 else "N/A"
 
-[SESSION TRADING PLAN]
-- Market Regime: {trading_config.get('market_regime')}
-- Setups Enabled: {json.dumps(trading_config.get('setups_enabled', {}))}
+        m3 = recent_bars.get("m3_last_3", [])
+        m3_compact = "|".join(
+            f"{b.get('open')}/{b.get('high')}/{b.get('low')}/{b.get('close')}"
+            for b in m3
+        ) if m3 else "N/A"
 
-[RECENT BARS CONTEXT]
-{json.dumps(recent_bars, indent=2)}
+        # Zones: chỉ 2 vùng gần nhất
+        zones = candidate_context.get("nearest_zones", [])[:2]
+        zones_compact = "|".join(
+            f"{z.get('type','?')}[{z.get('low')}-{z.get('high')}]"
+            for z in zones
+        ) if zones else "N/A"
 
-[EVALUATION RULES]
-1. Does this setup match the active Market Regime?
-2. Is entry inside the Wholesale zone with Part 1 R:R >= 1.0?
-3. Is there sufficient room to move to T1 before running into major HTF barriers?
-4. Are trapped traders visible or is momentum pushing against this entry?
+        prompt = f"""YTC Pre-Entry Gate | {setup} {side} {symbol}
+Regime:{regime} | DetScore:{det_score} | RR:{rr:.2f}
+Entry:{order_price} SL:{sl} T1:{tp1} T2:{tp2}
+Stall:{stall.get('low')}-{stall.get('high')}
+M1x5(O/H/L/C):{m1_compact}
+M3x3(O/H/L/C):{m3_compact}
+Zones(2):{zones_compact}
 
-[OUTPUT FORMAT]
-Reply in valid JSON only:
-{{
-  "approved": true,
-  "confidence": 0.85,
-  "reason": "Giải thích ngắn gọn bằng tiếng Việt lý do phê duyệt hoặc từ chối.",
-  "concerns": ["Điểm lưu ý hoặc rủi ro tiềm ẩn"],
-  "suggested_modifications": {{}}
-}}
-"""
+Evaluate ONLY micro-pattern & context not captured by deterministic rules:
+1. Do trapped traders confirm this {side} direction?
+2. Is micro-stall genuine consolidation or noise?
+3. Any momentum divergence against entry?
+
+Reply JSON only:
+{{"approved":true,"confidence":0.85,"reason":"Short Vietnamese reason","concerns":[],"suggested_modifications":{{}}}}"""
+
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -169,6 +177,8 @@ Reply in valid JSON only:
             print(f"[GeminiAIAdapter] Pre-entry evaluation API failed: {e}. Falling back to deterministic engine.")
 
         return await self.fallback.evaluate_candidate_trade(candidate_context, trading_config, recent_bars)
+
+
 
     async def audit_post_session(
         self,
@@ -247,6 +257,14 @@ You must reply with valid JSON conforming strictly to this JSON structure:
     "Concise lesson 2",
     "Concise lesson 3"
   ],
+  "structured_rules": [
+    {{
+      "condition": {{"setup": "PB", "regime": "SIDEWAYS_RANGE", "side": null}},
+      "action": "PENALIZE",
+      "delta": -0.25,
+      "reason": "PB trong SIDEWAYS thường bị bẫy tại vùng cản giữa"
+    }}
+  ],
   "raw_ai_analysis": "Executive summary paragraph of the audit."
 }}
 """
@@ -272,9 +290,11 @@ You must reply with valid JSON conforming strictly to this JSON structure:
                     parameter_adjustments_suggested=r.get("parameter_adjustments_suggested", {}),
                     plan_critique=r.get("plan_critique"),
                     trade_evaluations=r.get("trade_evaluations", []),
-                    raw_ai_analysis=r.get("raw_ai_analysis", "")
+                    raw_ai_analysis=r.get("raw_ai_analysis", ""),
+                    structured_rules=r.get("structured_rules", [])
                 )
         except Exception as e:
             print(f"[GeminiAIAdapter] Audit API call failed: {e}. Falling back to deterministic engine.")
 
         return await self.fallback.audit_post_session(trading_config_used, session_trades_json, full_session_ohlcv)
+
