@@ -10,9 +10,9 @@ from typing import List, Dict, Any
 from core.domain.rules.lessons_compiler import LessonRule, LessonsCompiler
 
 
-# Đường dẫn mặc định — đặt cạnh data folder của project
+# Đường dẫn mặc định — đặt trong data folder của trading_system
 DEFAULT_RULES_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "data", "lesson_rules.json"
+    os.path.dirname(__file__), "..", "..", "data", "lesson_rules.json"
 )
 
 

@@ -41,14 +41,17 @@ class BaseSetup(ABC):
         trend_str = str(trend).upper()
 
         if "TRENDING" in regime_str or "BREAKOUT" in regime_str:
-            # 1. Prohibit trading against the prevailing trend
-            if "UP" in trend_str and side == OrderSide.SELL:
+            # 1. Prohibit trading against the prevailing trend (strictly check active trend vs invalidated)
+            is_active_uptrend = ("UPTREND" in trend_str and "INVALIDATED" not in trend_str)
+            is_active_downtrend = ("DOWNTREND" in trend_str and "INVALIDATED" not in trend_str)
+
+            if is_active_uptrend and side == OrderSide.SELL:
                 return False, f"Counter-trend SELL strictly forbidden in {regime_str} UPTREND"
-            if "DOWN" in trend_str and side == OrderSide.BUY:
+            if is_active_downtrend and side == OrderSide.BUY:
                 return False, f"Counter-trend BUY strictly forbidden in {regime_str} DOWNTREND"
 
-            # 2. Prohibit range-bound setups during trend/breakout expansions
-            if setup_type in [SetupType.TST, SetupType.BOF]:
+            # 2. Prohibit pure range-bound TST during trend/breakout expansions
+            if setup_type == SetupType.TST:
                 return False, f"Setup {setup_type.value} strictly forbidden during {regime_str} (Trend continuation PB/BPB/CPB only)"
 
         return True, "COMPATIBLE"

@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
 
-from core.domain.models import SessionConfig, PositionState, TradeLifecycle
+from core.domain.models import SessionConfig, PositionState, TradeLifecycle, session_config_to_dict
 from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
 from core.use_cases.execution.circuit_breaker import CircuitBreakerUseCase
@@ -62,9 +62,13 @@ def serialize_trade(t: Any) -> Dict[str, Any]:
         "open_time": t.open_time,
         "close_time": t.close_time,
         "bars_in_trade": t.m1_bars_in_trade,
+        "bars_in_trailing": getattr(t, "bars_in_trailing", 0),
+        "profit_protection_level": getattr(t, "profit_protection_level", 0),
+        "max_unrealized_r_part2": getattr(t, "max_unrealized_r_part2", 0.0),
         "anchor_id": t.anchor_id,
         "entry_context": getattr(t, "entry_context", None) or {},
-        "close_context": getattr(t, "close_context", None) or {}
+        "close_context": getattr(t, "close_context", None) or {},
+        "total_pnl": getattr(t, "total_pnl", 0.0)
     }
 
 def create_server_a_app(
@@ -181,6 +185,20 @@ def create_server_a_app(
             "total_closed": len(closed),
             "total_active": len(active)
         }
+
+    @app.post("/api/trades/history/clear")
+    async def clear_trade_history():
+        state_ref["closed_trades"] = []
+        if json_store and hasattr(json_store, "save_session_trades"):
+            try:
+                json_store.save_session_trades([])
+            except Exception as e:
+                print(f"[Server A] Failed to clear session_trades.json: {e}")
+        await event_bus.publish("telemetry", {
+            "type": "TRADES_HISTORY_CLEARED",
+            "message": "Đã xóa toàn bộ nhật ký lệnh đã đóng trên hệ thống."
+        })
+        return {"status": "SUCCESS", "message": "Đã xóa sạch nhật ký lệnh đã đóng."}
 
     @app.post("/api/emergency/panic_close")
     async def panic_close():
@@ -413,23 +431,87 @@ def create_server_a_app(
             new_plan.session_tag = cfg_data.get("session_tag") or cur_tag
 
             state_ref["session_config_obj"] = new_plan
-            state_ref["session_config"] = {
-                "session_id": new_plan.session_id,
-                "symbol": new_plan.symbol,
-                "market_regime": new_plan.market_regime.value,
-                "setups_enabled": new_plan.setups_enabled,
-                "session_tag": new_plan.session_tag
-            }
+            state_ref["session_config"] = session_config_to_dict(new_plan)
+            await event_bus.publish("telemetry", {
+                "type": "SESSION_PLAN_RELOADED",
+                "session_tag": new_plan.session_tag,
+                "regime": new_plan.market_regime.value,
+                "config": state_ref["session_config"],
+                "reason": "AI Session Plan Manually Deployed"
+            })
             await event_bus.publish("plan_deployed", {
                 "session_id": new_plan.session_id,
                 "market_regime": new_plan.market_regime.value,
                 "setups_enabled": new_plan.setups_enabled,
-                "session_tag": new_plan.session_tag
+                "session_tag": new_plan.session_tag,
+                "config": state_ref["session_config"]
             })
             print(f"[SERVER A] Deployed new AI Session Plan: {new_plan.session_id} (Regime={new_plan.market_regime.value})")
-            return {"status": "SUCCESS", "message": f"Plan {new_plan.session_id} deployed to Server A successfully!"}
+            return {"status": "SUCCESS", "message": f"Plan {new_plan.session_id} deployed to Server A successfully!", "config": state_ref["session_config"]}
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid plan format: {e}")
+
+    @app.get("/api/config")
+    async def get_current_config():
+        """Returns the currently active session plan configuration with HTF zones."""
+        cfg = state_ref.get("session_config")
+        if not cfg and state_ref.get("session_config_obj"):
+            cfg = session_config_to_dict(state_ref.get("session_config_obj"))
+            state_ref["session_config"] = cfg
+        return cfg or {}
+
+    @app.post("/api/mt5/sync")
+    async def sync_mt5_positions():
+        """Scans MT5 terminal positions directly and reports status against Server state."""
+        if not hasattr(broker, "get_open_positions"):
+            return {"status": "SKIPPED", "message": "Broker does not support get_open_positions"}
+        
+        try:
+            positions = await broker.get_open_positions(state_ref.get("symbol", "XAUUSD"))
+            active_trades = state_ref.get("active_trades", [])
+            active_tickets = []
+            for t in active_trades:
+                if t.part1.ticket: active_tickets.append(t.part1.ticket)
+                if t.part2.ticket: active_tickets.append(t.part2.ticket)
+                if t.limit_order_ticket: active_tickets.append(t.limit_order_ticket)
+
+            orphans = [p for p in positions if p["ticket"] not in active_tickets]
+            return {
+                "status": "SUCCESS",
+                "mt5_positions_count": len(positions),
+                "active_trades_count": len(active_trades),
+                "orphaned_positions_count": len(orphans),
+                "mt5_positions": positions,
+                "orphaned_positions": orphans
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to scan MT5: {e}")
+
+    @app.post("/api/mt5/force_close_all")
+    async def force_close_all_mt5():
+        """Emergency force-close for all positions currently open on MT5 broker."""
+        if not hasattr(broker, "get_open_positions"):
+            return {"status": "SKIPPED", "message": "Broker does not support get_open_positions"}
+        
+        try:
+            positions = await broker.get_open_positions(state_ref.get("symbol", "XAUUSD"))
+            closed_tickets = []
+            failed_tickets = []
+            for p in positions:
+                ok = await broker.close_position(p["ticket"])
+                if ok:
+                    closed_tickets.append(p["ticket"])
+                else:
+                    failed_tickets.append(p["ticket"])
+
+            return {
+                "status": "SUCCESS",
+                "closed_count": len(closed_tickets),
+                "closed_tickets": closed_tickets,
+                "failed_tickets": failed_tickets
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to force close MT5 positions: {e}")
 
     @app.websocket("/ws/telemetry")
     async def websocket_telemetry(websocket: WebSocket):
@@ -437,7 +519,7 @@ def create_server_a_app(
         active_websockets.append(websocket)
         try:
             symbol = state_ref.get("symbol", "XAUUSD")
-            m30_bars = await broker.get_latest_bars(symbol, "M30", 50)
+            m15_bars = await broker.get_latest_bars(symbol, "M15", 60)
             m3_bars = await broker.get_latest_bars(symbol, "M3", 60)
             m1_bars = await broker.get_latest_bars(symbol, "M1", 60)
 
@@ -452,7 +534,8 @@ def create_server_a_app(
                 "status": "CONNECTED",
                 "setup_radar": state_ref.get("setup_radar"),
                 "bars": {
-                    "M30": format_bars(m30_bars),
+                    "M15": format_bars(m15_bars),
+                    "M30": format_bars(m15_bars),
                     "M3": format_bars(m3_bars),
                     "M1": format_bars(m1_bars)
                 }

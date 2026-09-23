@@ -134,6 +134,10 @@ class WholesaleCalculation:
     LRP: float             # Last Reward:Risk Price (boundary preserving R:R >= 1.0 for Part 1)
     is_valid_entry: bool   # Long: Entry <= min(LWP, LRP); Short: Entry >= max(LWP, LRP)
     recommended_entry: float
+    rr_ratio_part1: float = 0.0
+    min_rr_ratio: float = 1.0
+    sl_multiplier: float = 1.0
+    tp_multiplier: float = 1.0
 
 @dataclass
 class PositionPart:
@@ -167,6 +171,21 @@ class TradeLifecycle:
     max_bars_pending: Optional[int] = None
     entry_context: Optional[Dict[str, Any]] = None
     close_context: Optional[Dict[str, Any]] = None
+    profit_protection_level: int = 0
+    max_unrealized_r_part2: float = 0.0
+    profit_protection_events: List[Dict[str, Any]] = field(default_factory=list)
+    initial_risk_dist: float = 0.0
+    bars_in_trailing: int = 0
+    last_trailing_bar_timestamp: Optional[float] = None
+    early_profit_locked: bool = False
+
+    @property
+    def total_pnl(self) -> float:
+        return round((self.part1.pnl or 0.0) + (self.part2.pnl or 0.0), 2)
+
+    @property
+    def total_volume(self) -> float:
+        return round((self.part1.lot_size or 0.0) + (self.part2.lot_size or 0.0), 2)
 
 @dataclass
 class SessionConfig:
@@ -223,6 +242,9 @@ class InstrumentProfile:
     slippage_tolerance_pips: float
     min_sl_points: float = 2.50       # Sàn dừng lỗ tối thiểu an toàn để tránh bị quét bởi spread
     max_spread_points: float = 0.45   # Ngưỡng trần spread tối đa cho phép vào lệnh
+    min_profit_points: float = 2.00   # Khoảng cách giá tối thiểu để đạt mục tiêu lợi nhuận $2.00 trên 0.01 lot
+    candle_sl_multiplier: float = 1.20  # Hệ số nhân biên độ nến gần nhất để tính sàn khoảng cách SL động (e.g. 1.2x biên độ nến)
+    candle_buffer_ratio: float = 0.25   # Tỷ lệ đệm vượt ngoài đáy/đỉnh nến gần nhất (25% biên độ nến)
 
 def get_instrument_profile(symbol: str) -> InstrumentProfile:
     sym = symbol.upper()
@@ -235,13 +257,16 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
             tick_value=1.0,
             base_price=2650.00,
             min_buffer_points=0.80,    # $0.80 buffer for Gold volatility
-            be_buffer_points=0.30,     # $0.30 breakeven cushion to withstand Gold spread
+            be_buffer_points=2.00,     # $2.00 breakeven cushion to lock at least $2.00 profit on 0.01 lot
             sr_proximity_points=1.50,  # $1.50 zone proximity
             default_t1_points=5.00,    # $5.00 target 1
             default_t2_points=15.00,   # $15.00 target 2
             slippage_tolerance_pips=0.50,
             min_sl_points=2.50,        # Minimum 2.50 USD SL floor on Gold
-            max_spread_points=0.45     # Maximum 0.45 USD spread allowed
+            max_spread_points=0.45,    # Maximum 0.45 USD spread allowed
+            min_profit_points=2.00,    # Minimum $2.00 price move on 0.01 lot = $2.00 USD
+            candle_sl_multiplier=1.20, # SL floor = 120% of recent candle range (prevents stop hunts)
+            candle_buffer_ratio=0.25   # Extra buffer = 25% of recent candle range beyond wick extremes
         )
     elif "BTC" in sym:
         return InstrumentProfile(
@@ -258,7 +283,8 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
             default_t2_points=800.00,
             slippage_tolerance_pips=10.0,
             min_sl_points=150.00,
-            max_spread_points=25.00
+            max_spread_points=25.00,
+            min_profit_points=100.00
         )
     else:
         # Default Forex 5-digit (EURUSD, GBPUSD, etc.)
@@ -270,12 +296,74 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
             tick_value=1.0,
             base_price=1.08500,
             min_buffer_points=0.00020, # 2 pips
-            be_buffer_points=0.00010,  # 1 pip
+            be_buffer_points=0.00020,  # 2 pips
             sr_proximity_points=0.00050, # 5 pips
             default_t1_points=0.00200, # 20 pips
             default_t2_points=0.00500, # 50 pips
             slippage_tolerance_pips=1.0,
             min_sl_points=0.00150,     # 15 pips min SL
-            max_spread_points=0.00030  # 3 pips max spread
+            max_spread_points=0.00030, # 3 pips max spread
+            min_profit_points=0.00020  # 2 pips minimum profit
         )
+
+def calculate_pnl(
+    entry_price: float,
+    close_price: float,
+    lot_size: float,
+    side: OrderSide,
+    profile: Optional[InstrumentProfile] = None
+) -> float:
+    """
+    Calculates realized PnL in USD based on entry, exit, volume, and instrument profile.
+    """
+    if lot_size <= 0:
+        return 0.0
+    if side == OrderSide.BUY:
+        pts = close_price - entry_price
+    else:
+        pts = entry_price - close_price
+
+    if profile is None:
+        return round(pts * 100.0 * lot_size, 2)
+
+    pnl = pts * profile.contract_size * lot_size
+    return round(pnl, 2)
+
+def session_config_to_dict(config: Optional[SessionConfig]) -> Dict[str, Any]:
+    if config is None:
+        return {}
+    return {
+        "session_id": config.session_id,
+        "symbol": config.symbol,
+        "generated_at": config.generated_at,
+        "market_regime": config.market_regime.value if hasattr(config.market_regime, "value") else str(config.market_regime),
+        "setups_enabled": config.setups_enabled,
+        "execution_rules": config.execution_rules,
+        "risk_management": config.risk_management,
+        "news_filter": config.news_filter,
+        "session_tag": config.session_tag,
+        "htf_zones": {
+            "resistance_zones": [
+                {
+                    "id": z.id,
+                    "high": z.high,
+                    "low": z.low,
+                    "significance": z.significance.value if hasattr(z.significance, "value") else str(z.significance),
+                    "zone_type": getattr(z, "zone_type", "RESISTANCE")
+                }
+                for z in (config.resistance_zones or [])
+            ],
+            "support_zones": [
+                {
+                    "id": z.id,
+                    "high": z.high,
+                    "low": z.low,
+                    "significance": z.significance.value if hasattr(z.significance, "value") else str(z.significance),
+                    "zone_type": getattr(z, "zone_type", "SUPPORT")
+                }
+                for z in (config.support_zones or [])
+            ]
+        }
+    }
+
 

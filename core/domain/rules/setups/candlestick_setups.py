@@ -11,14 +11,15 @@ from core.domain.rules.vector_dynamics import MicroPatternDetector
 def _calc_thresholds(bars_1m: List[Bar], profile: Optional[InstrumentProfile] = None) -> Tuple[float, float, float]:
     atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
     if profile:
+        min_p = getattr(profile, "min_profit_points", 1.0)
         prox = max(profile.sr_proximity_points, atr * 0.3)
-        t1_dist = max(profile.default_t1_points, atr * 1.5)
-        t2_dist = max(profile.default_t2_points, atr * 3.5)
+        t1_dist = max(profile.default_t1_points, min_p, atr * 1.5)
+        t2_dist = max(profile.default_t2_points, min_p * 3.0, atr * 3.5)
     else:
         last_price = bars_1m[-1].close if bars_1m else 1.0
         prox = max(last_price * 0.0005, atr * 0.3)
-        t1_dist = max(last_price * 0.0020, atr * 1.5)
-        t2_dist = max(last_price * 0.0040, atr * 3.5)
+        t1_dist = max(last_price * 0.0020, 1.0, atr * 1.5)
+        t2_dist = max(last_price * 0.0040, 3.0, atr * 3.5)
     return prox, t1_dist, t2_dist
 
 

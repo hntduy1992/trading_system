@@ -94,20 +94,22 @@ class ZoneMonitor:
 
     @staticmethod
     def find_next_htf_target(
-        bars_m30: List[Bar],
-        side: OrderSide,
-        current_price: float,
-        profile: Optional[InstrumentProfile] = None
+        bars_htf: Optional[List[Bar]] = None,
+        side: OrderSide = OrderSide.BUY,
+        current_price: float = 0.0,
+        profile: Optional[InstrumentProfile] = None,
+        bars_m30: Optional[List[Bar]] = None
     ) -> float:
         """
-        Dynamically scans M30 historical swing points in memory to provide a valid T2 target
+        Dynamically scans HTF (M15/M30) historical swing points in memory to provide a valid T2 target
         when all predetermined session zones have been cleared.
         """
+        bars = bars_htf if bars_htf is not None else bars_m30
         default_dist = profile.default_t2_points if profile else 15.0
-        if not bars_m30 or len(bars_m30) < 5:
+        if not bars or len(bars) < 5:
             return (current_price + default_dist) if side == OrderSide.BUY else (current_price - default_dist)
 
-        swings = SwingDetector.detect_swings(bars_m30)
+        swings = SwingDetector.detect_swings(bars)
         buffer = profile.min_buffer_points if profile else 0.50
 
         if side == OrderSide.BUY:
@@ -126,27 +128,33 @@ class ZoneMonitor:
 
     @staticmethod
     def should_trigger_ai_replan(
-        curr_bar_m30: Bar,
-        config: SessionConfig,
-        profile: Optional[InstrumentProfile] = None
+        curr_bar_htf: Optional[Bar] = None,
+        config: Optional[SessionConfig] = None,
+        profile: Optional[InstrumentProfile] = None,
+        curr_bar_m30: Optional[Bar] = None
     ) -> Tuple[bool, str]:
         """
         Tier 2 Async AI Re-Plan Trigger:
-        Verifies if an M30 candle has officially closed beyond extreme session boundaries,
+        Verifies if an HTF (M15/M30) candle has officially closed beyond extreme session boundaries,
         warranting a full background AI re-analysis from Server B.
         """
+        curr_bar = curr_bar_htf or curr_bar_m30
+        if not curr_bar or not config:
+            return False, "BOUNDARIES_INTACT"
+
         buffer = profile.min_buffer_points if profile else 1.0
+        tf_label = curr_bar.timeframe or "HTF"
         
         # Check if closing above all original resistance zones
         if config.resistance_zones:
             max_res = max(z.high for z in config.resistance_zones)
-            if curr_bar_m30.close > max_res + buffer:
-                return True, f"M30 close {curr_bar_m30.close} broke above max session resistance {max_res}."
+            if curr_bar.close > max_res + buffer:
+                return True, f"{tf_label} close {curr_bar.close} broke above max session resistance {max_res}."
 
         # Check if closing below all original support zones
         if config.support_zones:
             min_sup = min(z.low for z in config.support_zones)
-            if curr_bar_m30.close < min_sup - buffer:
-                return True, f"M30 close {curr_bar_m30.close} broke below min session support {min_sup}."
+            if curr_bar.close < min_sup - buffer:
+                return True, f"{tf_label} close {curr_bar.close} broke below min session support {min_sup}."
 
         return False, "BOUNDARIES_INTACT"

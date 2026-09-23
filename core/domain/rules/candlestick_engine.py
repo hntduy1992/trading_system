@@ -10,7 +10,7 @@ Module 4: Narrow Range 7 (NR7 System + EMA 20 Isolation)
 Module 5: Yum-Yum Continuation Breakout (Wide Range Expansion)
 """
 from typing import List, Tuple, Optional, Dict, Any
-from core.domain.models import Bar, OrderSide
+from core.domain.models import Bar, OrderSide, TradeLifecycle
 
 class CandlestickEngine:
     """
@@ -198,8 +198,11 @@ class CandlestickEngine:
         if context_bull and is_tb_bar2 and dir_bar2 == "BEARISH":
             # Bar 1 makes a lower low than Bar 2, but FAILS to be a Bearish Trend Bar
             if bar1.low < bar2.low and not (is_tb_bar1 and dir_bar1 == "BEARISH"):
+                # SL dựa vào biên độ nến gần nhất: đệm ít nhất 25% biên độ nến, tối thiểu 20 tick
+                bar1_range = bar1.high - bar1.low
+                sl_buffer = max(tick_size * 20, bar1_range * 0.25)
                 entry_price = bar1.high + tick_size
-                sl_price = bar1.low - tick_size
+                sl_price = bar1.low - sl_buffer
                 return True, OrderSide.BUY, entry_price, sl_price, 1
 
         # 2. SELL SIGNAL: Bullish Trend Bar Failure (Trapped Bulls)
@@ -208,8 +211,11 @@ class CandlestickEngine:
         if context_bear and is_tb_bar2 and dir_bar2 == "BULLISH":
             # Bar 1 makes a higher high than Bar 2, but FAILS to be a Bullish Trend Bar
             if bar1.high > bar2.high and not (is_tb_bar1 and dir_bar1 == "BULLISH"):
+                # SL dựa vào biên độ nến gần nhất: đệm ít nhất 25% biên độ nến, tối thiểu 20 tick
+                bar1_range = bar1.high - bar1.low
+                sl_buffer = max(tick_size * 20, bar1_range * 0.25)
                 entry_price = bar1.low - tick_size
-                sl_price = bar1.high + tick_size
+                sl_price = bar1.high + sl_buffer
                 return True, OrderSide.SELL, entry_price, sl_price, 1
 
         return False, None, None, None, 1
@@ -244,14 +250,18 @@ class CandlestickEngine:
 
         # Bullish setup: Price broke above SMA21 and mother bar holds above SMA21
         if mother.low > sma21[-2] and closes[-3] > sma21[-3]:
+            mother_range = mother.high - mother.low
+            sl_buffer = max(tick_size * 20, mother_range * 0.25)
             entry_price = mother.high + tick_size
-            sl_price = mother.low - tick_size
+            sl_price = mother.low - sl_buffer
             return True, OrderSide.BUY, entry_price, sl_price, 3
 
         # Bearish setup: Price broke below SMA21 and mother bar holds below SMA21
         if mother.high < sma21[-2] and closes[-3] < sma21[-3]:
+            mother_range = mother.high - mother.low
+            sl_buffer = max(tick_size * 20, mother_range * 0.25)
             entry_price = mother.low - tick_size
-            sl_price = mother.high + tick_size
+            sl_price = mother.high + sl_buffer
             return True, OrderSide.SELL, entry_price, sl_price, 3
 
         return False, None, None, None, 3
@@ -279,13 +289,17 @@ class CandlestickEngine:
         bar1 = bars[-1]
 
         if is_support and "UP" in trend.upper():
+            bar1_range = bar1.high - bar1.low
+            sl_buffer = max(tick_size * 20, bar1_range * 0.25)
             entry_price = bar1.high + tick_size
-            sl_price = bar1.low - tick_size
+            sl_price = bar1.low - sl_buffer
             return True, OrderSide.BUY, entry_price, sl_price, 2
 
         if is_resistance and "DOWN" in trend.upper():
+            bar1_range = bar1.high - bar1.low
+            sl_buffer = max(tick_size * 20, bar1_range * 0.25)
             entry_price = bar1.low - tick_size
-            sl_price = bar1.high + tick_size
+            sl_price = bar1.high + sl_buffer
             return True, OrderSide.SELL, entry_price, sl_price, 2
 
         return False, None, None, None, 2
@@ -322,9 +336,12 @@ class CandlestickEngine:
                 break
 
         bar1 = bars[-1]
+        bar1_range = bar1.high - bar1.low
+        sl_buffer = max(tick_size * 20, bar1_range * 0.25)
+
         if is_bullish_aligned:
             entry_price = bar1.high + (2.0 * tick_size)
-            sl_price = bar1.low - tick_size
+            sl_price = bar1.low - sl_buffer
             return True, OrderSide.BUY, entry_price, sl_price, 2
 
         # Check SELL FILTER: prior 6 bars fully below EMA 20
@@ -337,7 +354,7 @@ class CandlestickEngine:
 
         if is_bearish_aligned:
             entry_price = bar1.low - (2.0 * tick_size)
-            sl_price = bar1.high + tick_size
+            sl_price = bar1.high + sl_buffer
             return True, OrderSide.SELL, entry_price, sl_price, 2
 
         return False, None, None, None, 2
@@ -372,7 +389,9 @@ class CandlestickEngine:
         top_20_pct = (bar1.high - bar1.close) / bar1.range <= 0.20
         if top_20_pct and (bar1.close > ema21[-1]) and (ema21[-1] > ema21[-2]):
             recent_lows = [b.low for b in bars[-6:]]
-            sl_price = min(recent_lows) - tick_size
+            bar1_range = bar1.high - bar1.low
+            sl_buffer = max(tick_size * 20, bar1_range * 0.25)
+            sl_price = min(recent_lows) - sl_buffer
             entry_price = bar1.high + tick_size
             return True, OrderSide.BUY, entry_price, sl_price, 3
 
@@ -380,7 +399,9 @@ class CandlestickEngine:
         bottom_20_pct = (bar1.close - bar1.low) / bar1.range <= 0.20
         if bottom_20_pct and (bar1.close < ema21[-1]) and (ema21[-1] < ema21[-2]):
             recent_highs = [b.high for b in bars[-6:]]
-            sl_price = max(recent_highs) + tick_size
+            bar1_range = bar1.high - bar1.low
+            sl_buffer = max(tick_size * 20, bar1_range * 0.25)
+            sl_price = max(recent_highs) + sl_buffer
             entry_price = bar1.low - tick_size
             return True, OrderSide.SELL, entry_price, sl_price, 3
 
@@ -421,3 +442,158 @@ class CandlestickEngine:
             "upper_wick_ratio": round(last_bar.upper_wick / last_bar.range, 2) if last_bar.range > 0 else 0.0,
             "lower_wick_ratio": round(last_bar.lower_wick / last_bar.range, 2) if last_bar.range > 0 else 0.0,
         }
+
+    # -------------------------------------------------------------------------
+    # 4. CANDLESTICK EXIT ENGINE (PRICE ACTION REVERSAL EXITS)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def evaluate_candlestick_exit(
+        trade: TradeLifecycle,
+        bars_m1: List[Bar],
+        bars_m3: Optional[List[Bar]] = None,
+        min_r: float = 0.0,
+        curr_price: Optional[float] = None
+    ) -> Tuple[bool, str]:
+        """
+        Candlestick Exit Engine:
+        Evaluates micro Price Action candlestick patterns on closed M1 (and M3) bars
+        to trigger active market closure instead of relying on trailing stop loss.
+
+        Patterns Detected:
+        1. Pin Bar Rejection (Shooting Star for BUY, Hammer for SELL)
+        2. Engulfing Bar Reversal (Bearish Engulfing for BUY, Bullish Engulfing for SELL)
+        3. Momentum Reversal Bar (Opposite trend bar with wide expansion >= 1.25 ATR)
+        4. Climactic Exhaustion Candle (Wide range >= 2.0 ATR with heavy opposing wick)
+        5. Two-Bar Reversal (Opposing candle penetrating deeply > 50% into previous bar)
+
+        Returns:
+            (should_exit: bool, exit_reason: str)
+        """
+        if not bars_m1 or len(bars_m1) < 2:
+            return False, ""
+
+        curr_bar = bars_m1[-1]
+        prev_bar = bars_m1[-2]
+
+        if curr_bar.range <= 0.0:
+            return False, ""
+
+        from core.domain.rules.vector_dynamics import MicroPatternDetector
+        atr = MicroPatternDetector.calculate_atr(bars_m1, period=14) if len(bars_m1) >= 5 else 1.0
+        if atr <= 0.0:
+            atr = 1.0
+
+        current_p = curr_price if curr_price is not None else curr_bar.close
+
+        # Calculate unrealized R progress
+        risk_dist = getattr(trade, "initial_risk_dist", 0.0)
+        if not risk_dist or risk_dist <= 0:
+            risk_dist = abs(trade.part1.entry_price - trade.part1.sl_price)
+
+        if trade.side == OrderSide.BUY:
+            profit_dist = current_p - trade.part1.entry_price
+        else:
+            profit_dist = trade.part1.entry_price - current_p
+
+        unrealized_r = (profit_dist / risk_dist) if risk_dist > 0 else 0.0
+
+        # Don't trigger exits if profit hasn't reached min_r and positive profit
+        has_min_profit = (unrealized_r >= min_r) and (profit_dist > 0.0)
+
+        # ---------------------------------------------------------------------
+        # 1. EVALUATION FOR BUY (LONG) POSITIONS
+        # ---------------------------------------------------------------------
+        if trade.side == OrderSide.BUY:
+            # A. Shooting Star / Bearish Pin Bar Rejection (Strong selling rejection wick at highs)
+            upper_ratio = curr_bar.upper_wick / curr_bar.range
+            lower_ratio = curr_bar.lower_wick / curr_bar.range
+            body_ratio = curr_bar.body / curr_bar.range
+            close_in_bottom = (curr_bar.close - curr_bar.low) / curr_bar.range <= 0.40
+
+            if upper_ratio >= 0.55 and lower_ratio <= 0.30 and close_in_bottom:
+                if has_min_profit:
+                    return True, f"CANDLE_EXIT_PINBAR_REJECTION (Upper wick {upper_ratio*100:.0f}%, range {curr_bar.range:.2f})"
+
+            # B. Bearish Engulfing Bar (Bearish body engulfs previous bullish bar)
+            prev_was_bullish = prev_bar.close >= prev_bar.open
+            curr_is_bearish = curr_bar.close < curr_bar.open
+            if curr_is_bearish and prev_was_bullish and body_ratio >= 0.50:
+                if curr_bar.close < prev_bar.low and curr_bar.open >= (prev_bar.close - 0.10):
+                    if has_min_profit:
+                        return True, f"CANDLE_EXIT_BEARISH_ENGULFING (Close {curr_bar.close:.2f} < Prev low {prev_bar.low:.2f})"
+
+            # C. Bearish Momentum Reversal (Large opposite trend bar >= 1.25 ATR breaking lows)
+            is_tb, dir_tb = CandlestickEngine.detect_trend_bar(curr_bar)
+            if is_tb and dir_tb == "BEARISH":
+                is_expansion = curr_bar.range >= max(1.25 * atr, 0.6)
+                if is_expansion and curr_bar.close < prev_bar.low and has_min_profit:
+                    return True, f"CANDLE_EXIT_MOMENTUM_REVERSAL (Range {curr_bar.range:.2f} >= 1.25*ATR {1.25*atr:.2f})"
+
+            # D. Climactic Exhaustion Bar (Ultra-wide expansion with upper wick rejection)
+            if curr_bar.range >= max(2.0 * atr, 1.2) and curr_bar.high > prev_bar.high and has_min_profit:
+                if upper_ratio >= 0.35 or (curr_bar.high - curr_bar.close) >= 0.45 * curr_bar.range:
+                    return True, f"CANDLE_EXIT_CLIMAX_EXHAUSTION (Range {curr_bar.range:.2f} >= 2.0*ATR, upper wick {upper_ratio*100:.0f}%)"
+
+            # E. Two-Bar Reversal / Dark Cloud Cover
+            if prev_was_bullish and curr_is_bearish and prev_bar.range > 0:
+                prev_midpoint = (prev_bar.open + prev_bar.close) / 2.0
+                if curr_bar.close < prev_midpoint and curr_bar.high >= prev_bar.high - 0.20:
+                    if has_min_profit and curr_bar.body >= 0.50 * curr_bar.range:
+                        return True, f"CANDLE_EXIT_TWO_BAR_REVERSAL (Penetrated below prev midpoint {prev_midpoint:.2f})"
+
+        # ---------------------------------------------------------------------
+        # 2. EVALUATION FOR SELL (SHORT) POSITIONS
+        # ---------------------------------------------------------------------
+        else:
+            # A. Hammer / Bullish Pin Bar Rejection (Strong buying rejection wick at lows)
+            upper_ratio = curr_bar.upper_wick / curr_bar.range
+            lower_ratio = curr_bar.lower_wick / curr_bar.range
+            body_ratio = curr_bar.body / curr_bar.range
+            close_in_top = (curr_bar.high - curr_bar.close) / curr_bar.range <= 0.40
+
+            if lower_ratio >= 0.55 and upper_ratio <= 0.30 and close_in_top:
+                if has_min_profit:
+                    return True, f"CANDLE_EXIT_PINBAR_REJECTION (Lower wick {lower_ratio*100:.0f}%, range {curr_bar.range:.2f})"
+
+            # B. Bullish Engulfing Bar (Bullish body engulfs previous bearish bar)
+            prev_was_bearish = prev_bar.close <= prev_bar.open
+            curr_is_bullish = curr_bar.close > curr_bar.open
+            if curr_is_bullish and prev_was_bearish and body_ratio >= 0.50:
+                if curr_bar.close > prev_bar.high and curr_bar.open <= (prev_bar.close + 0.10):
+                    if has_min_profit:
+                        return True, f"CANDLE_EXIT_BULLISH_ENGULFING (Close {curr_bar.close:.2f} > Prev high {prev_bar.high:.2f})"
+
+            # C. Bullish Momentum Reversal (Large opposite trend bar >= 1.25 ATR breaking highs)
+            is_tb, dir_tb = CandlestickEngine.detect_trend_bar(curr_bar)
+            if is_tb and dir_tb == "BULLISH":
+                is_expansion = curr_bar.range >= max(1.25 * atr, 0.6)
+                if is_expansion and curr_bar.close > prev_bar.high and has_min_profit:
+                    return True, f"CANDLE_EXIT_MOMENTUM_REVERSAL (Range {curr_bar.range:.2f} >= 1.25*ATR {1.25*atr:.2f})"
+
+            # D. Climactic Exhaustion Bar (Ultra-wide expansion down with lower wick rejection)
+            if curr_bar.range >= max(2.0 * atr, 1.2) and curr_bar.low < prev_bar.low and has_min_profit:
+                if lower_ratio >= 0.35 or (curr_bar.close - curr_bar.low) >= 0.45 * curr_bar.range:
+                    return True, f"CANDLE_EXIT_CLIMAX_EXHAUSTION (Range {curr_bar.range:.2f} >= 2.0*ATR, lower wick {lower_ratio*100:.0f}%)"
+
+            # E. Two-Bar Reversal / Piercing Line
+            if prev_was_bearish and curr_is_bullish and prev_bar.range > 0:
+                prev_midpoint = (prev_bar.open + prev_bar.close) / 2.0
+                if curr_bar.close > prev_midpoint and curr_bar.low <= prev_bar.low + 0.20:
+                    if has_min_profit and curr_bar.body >= 0.50 * curr_bar.range:
+                        return True, f"CANDLE_EXIT_TWO_BAR_REVERSAL (Penetrated above prev midpoint {prev_midpoint:.2f})"
+
+        # ---------------------------------------------------------------------
+        # 3. HIGHER TIMEFRAME CONFIRMATION (M3 Pin Bar / Engulfing)
+        # ---------------------------------------------------------------------
+        if bars_m3 and len(bars_m3) >= 2 and has_min_profit:
+            curr_m3 = bars_m3[-1]
+            if curr_m3.range > 0:
+                if trade.side == OrderSide.BUY:
+                    if (curr_m3.upper_wick / curr_m3.range) >= 0.60:
+                        return True, f"CANDLE_EXIT_M3_PINBAR (M3 Upper Wick {(curr_m3.upper_wick/curr_m3.range)*100:.0f}%)"
+                else:
+                    if (curr_m3.lower_wick / curr_m3.range) >= 0.60:
+                        return True, f"CANDLE_EXIT_M3_PINBAR (M3 Lower Wick {(curr_m3.lower_wick/curr_m3.range)*100:.0f}%)"
+
+        return False, ""

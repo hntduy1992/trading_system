@@ -18,12 +18,12 @@ class CircuitBreakerUseCase:
         now = time.time()
         for trade in active_trades:
             if trade.state in [PositionState.IN_POSITION, PositionState.TRAILING_STOP]:
-                if trade.part1.ticket and not trade.part1.is_closed:
-                    await self.broker.close_position(trade.part1.ticket)
-                    trade.part1.is_closed = True
-                if trade.part2.ticket and not trade.part2.is_closed:
-                    await self.broker.close_position(trade.part2.ticket)
-                    trade.part2.is_closed = True
+                closed_tickets = set()
+                for part in [trade.part1, trade.part2]:
+                    if part.ticket and part.ticket not in closed_tickets and not part.is_closed:
+                        await self.broker.close_position(part.ticket)
+                        closed_tickets.add(part.ticket)
+                    part.is_closed = True
                 trade.state = PositionState.FULLY_CLOSED
                 trade.close_time = now
                 trade.close_context = {

@@ -139,11 +139,19 @@ class SessionManager:
             return False
 
         cfg_tag = getattr(current_cfg, "session_tag", None)
-        if cfg_tag and cfg_tag == expected_session_tag:
-            return True
+        if cfg_tag:
+            return cfg_tag == expected_session_tag
 
         if current_cfg.session_id and expected_session_tag in current_cfg.session_id:
             return True
+
+        # Fallback: check if the date portion matches (backward compat with old plans
+        # that have session_id like "sess_20260916_205014" but no session_tag).
+        # e.g. expected "NEW_YORK_20260916" → date_str "20260916"
+        if current_cfg.session_id:
+            date_str = expected_session_tag.split("_")[-1]  # e.g. "20260916"
+            if date_str and len(date_str) == 8 and date_str in current_cfg.session_id:
+                return True
 
         return False
 

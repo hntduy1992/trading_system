@@ -38,7 +38,7 @@ Do not provide prose explanations outside the JSON structure.
 [INPUT CONTEXT]
 - Symbol: {symbol}
 - Historical 100-session baseline: {json.dumps(quant_baseline_metrics)}
-- Last 24h HTF (30m) & TTF (3m) Rates: {json.dumps(recent_rates_json)}
+- Last 24h HTF (15m) & TTF (3m) Rates: {json.dumps(recent_rates_json)}
 - Today's Economic Calendar: {json.dumps(economic_events)}
 - Relevant Lessons Learned (Vector RAG): {json.dumps(retrieved_rag_lessons)}
 

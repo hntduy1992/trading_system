@@ -91,7 +91,7 @@ class BrokerConfig:
     SYMBOL: str = os.getenv("SYMBOL", "XAUUSD")
 
     TIMEFRAMES: Dict[str, str] = field(default_factory=lambda: {
-        "HTF": "M30",
+        "HTF": "M15",
         "TTF": "M3",
         "LTF": "M1"
     })
@@ -112,12 +112,94 @@ class RiskRulesConfig:
     SESSION_DRAWDOWN_TIMEOUT_PERCENT: float = 2.0
     SESSION_DRAWDOWN_HARDSTOP_PERCENT: float = 3.0
     BUSINESS_DRAWDOWN_STOP_PERCENT: float = 20.0
-    MIN_RR_RATIO_PART1: float = 1.0
+    MIN_RR_RATIO_PART1: float = 0.75   # Tỷ lệ R:R tối thiểu cho Part 1 theo Lance Beggs YTC
+    SL_MULTIPLIER: float = 1.20   # Nới rộng SL lên 120%
+    TP_MULTIPLIER: float = 0.90   # Thu hẹp TP còn 90%
     REQUIRE_WHOLESALE_ENTRY: bool = True
     MAX_ENTRY_TIMEOUT_BARS_1M: int = 4
     STALL_MIN_CANDLES: int = 3
     SCRATCH_TIMEOUT_BARS_1M: int = 5
     SLIPPAGE_TOLERANCE_PIPS: float = 1.0
+    MIN_PROFIT_USD: float = 2.0   # Lợi nhuận tối thiểu $2.00 cho mỗi lệnh 0.01 lot
+    ENABLE_SL_TRAILING: bool = False       # Tắt hoàn toàn việc dời SL tự động theo giá
+    ENABLE_EARLY_PROFIT_LOCK: bool = False # Tắt dời SL sớm ở IN_POSITION
+    EARLY_LOCK_MIN_USD: float = 2.0
+    EARLY_LOCK_MIN_R: float = 0.5
+    CANDLE_SL_MULTIPLIER: float = 1.20    # Hệ số nhân biên độ nến gần nhất để tính sàn SL động (1.2x biên độ nến)
+    CANDLE_BUFFER_RATIO: float = 0.25     # Tỷ lệ đệm vượt ngoài đáy/đỉnh nến gần nhất (25% biên độ nến)
+
+@dataclass
+class ProfitProtectionConfig:
+    """
+    Cơ chế bảo vệ lợi nhuận chủ động cho Part 2 sau khi chạm T1.
+    Tối ưu chuyên sâu cho XAUUSD (Gold): Chốt lệnh theo mô hình nến, không dời SL gây quét non.
+    """
+    ENABLED: bool = True
+    MIN_PROFIT_USD: float = 2.0   # Lợi nhuận tối thiểu $2.00 cho mỗi 0.01 lot
+    ENABLE_SL_TRAILING: bool = False       # Tắt dời SL của Part 2 (giữ SL cố định làm hard disaster stop)
+    ENABLE_RATCHET_SL: bool = False        # Tắt nâng SL theo bậc thang R
+    ENABLE_SWING_TRAILING: bool = False    # Tắt kéo SL theo Swing M1/M3
+    ENABLE_TIME_LOCK: bool = False         # Tắt dời SL theo thời gian
+    
+    # Candlestick Exit Engine (Chốt lệnh chủ động theo dấu hiệu nến Price Action)
+    ENABLE_CANDLESTICK_EXITS: bool = True  # Bật chốt lệnh chủ động theo nến đảo chiều
+    CANDLESTICK_EXIT_MIN_HOLDING_BARS: int = 1
+    CANDLESTICK_EXIT_MIN_R: float = 0.5    # Ngưỡng R tối thiểu để chốt nến khi có lãi (>= 0.5R)
+
+    # Lớp 1: Dynamic R-Multiple Ratchet (Dành cho khi ENABLE_RATCHET_SL = True)
+    RATCHET_LEVELS: List[Dict[str, float]] = field(default_factory=lambda: [
+        {"level": 1, "min_r": 0.8, "lock_r": 0.2},
+        {"level": 2, "min_r": 1.2, "lock_r": 0.5},
+        {"level": 3, "min_r": 1.8, "lock_r": 1.0},
+        {"level": 4, "min_r": 2.5, "lock_r": 1.8},
+    ])
+    
+    # Lớp 2: Momentum Reversal Guard (Chỉ thoát khi đảo chiều thật sự, không cắt nhịp pullback lành mạnh)
+    ENABLE_MOMENTUM_GUARD: bool = True
+    MOMENTUM_ATR_PERIOD: int = 14
+    MOMENTUM_BAR_ATR_MULT: float = 1.6      # Nến M1 ngược chiều >= 1.6 * ATR(14)
+    MOMENTUM_REVERSAL_RETRACE_PCT: float = 0.50  # Trả lại >= 50% lợi nhuận đỉnh Part 2
+    MIN_PEAK_R_FOR_GUARD: float = 1.2       # Chỉ bật Guard nếu Part 2 từng chạm >= +1.2R
+    
+    # Lớp 3: Adaptive Time-Based Profit Lock (Vàng đi ngang quá lâu không bứt phá tới T2)
+    TIME_LOCK_BARS: int = 20                # 20 nến M1 (20 phút) ở trạng thái trailing
+    TIME_LOCK_MIN_R: float = 0.8            # Nếu đang có >= +0.8R
+    TIME_LOCK_SECURE_R: float = 0.5         # Thì nâng SL khóa ít nhất +0.5R
+
+
+@dataclass
+class PWESConfig:
+    """Probability-Weighted Entry System - Cấu hình 5 module mới"""
+    ENABLED: bool = True
+
+    # Module 1: Session-Aware Probability Layer
+    ENABLE_SESSION_FILTER: bool = True
+    DEAD_ZONE_START_HOUR: int = 3   # UTC+7
+    DEAD_ZONE_END_HOUR: int = 7     # UTC+7
+
+    # Module 2: Confluence Probability Score
+    ENABLE_CONFLUENCE_FILTER: bool = True
+    MIN_CONFLUENCE_SIGNALS: int = 3  # Tối thiểu 3/5 tín hiệu
+
+    # Module 3: Dynamic Lot Sizer
+    ENABLE_DYNAMIC_LOT: bool = True
+    MIN_NET_PROFIT_USD: float = 2.0   # Mục tiêu lợi nhuận tối thiểu
+    EST_COMMISSION_PER_LOT: float = 7.0  # USD/lot round-trip
+    EST_SPREAD_POINTS: float = 0.50      # Points spread XAUUSD
+    MAX_LOT_SIZE: float = 1.0
+
+    # Module 4: Probability-Based Exit
+    ENABLE_PROB_EXIT: bool = True
+    EXIT_HOLD_THRESHOLD: float = 0.70
+    EXIT_BREAKEVEN_THRESHOLD: float = 0.50
+    EXIT_PROFIT_THRESHOLD: float = 0.30
+
+    # Module 5: Kelly Criterion Anti-Revenge Lot Scaling
+    ENABLE_KELLY_SCALING: bool = True
+    KELLY_LOOKBACK_TRADES: int = 20   # Dùng 20 lệnh gần nhất để ước tính win rate
+    MAX_CONSECUTIVE_LOSSES_SKIP: int = 5
+    MAX_CONSECUTIVE_LOSSES_REDUCE: int = 3
+
 
 @dataclass
 class AppConfig:
@@ -125,6 +207,8 @@ class AppConfig:
     broker: BrokerConfig = field(default_factory=BrokerConfig)
     ai: AIConfig = field(default_factory=AIConfig)
     risk: RiskRulesConfig = field(default_factory=RiskRulesConfig)
+    profit_protection: ProfitProtectionConfig = field(default_factory=ProfitProtectionConfig)
+    pwes: PWESConfig = field(default_factory=PWESConfig)
     base_dir: str = BASE_DIR
 
 def reload_config(env_name_or_path: Optional[str] = None, mode: Optional[str] = None) -> AppConfig:
@@ -154,9 +238,12 @@ def reload_config(env_name_or_path: Optional[str] = None, mode: Optional[str] = 
             MODEL_NAME=os.getenv("AI_MODEL_NAME", "gemini-2.0-flash"),
         ),
         risk=RiskRulesConfig(),
+        profit_protection=ProfitProtectionConfig(),
+        pwes=PWESConfig(),
         base_dir=BASE_DIR
     )
     return CONFIG
 
 # Global Singleton Config
 CONFIG = reload_config()
+

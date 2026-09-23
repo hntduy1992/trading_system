@@ -62,6 +62,17 @@ class IBrokerGateway(ABC):
         pass
 
     @abstractmethod
+    async def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get list of currently open positions from the broker."""
+        pass
+
+    @abstractmethod
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get list of active pending orders from the broker."""
+        pass
+
+    @abstractmethod
     async def get_terminal_status(self) -> Dict[str, Any]:
         """Check broker connection, terminal AlgoTrading status, and account permissions."""
         pass
+

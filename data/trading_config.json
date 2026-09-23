@@ -1,38 +1,8 @@
 {
-  "session_id": "sess_20260916_111329",
+  "session_id": "sess_20260923_204922",
   "symbol": "XAUUSD",
-  "generated_at": "2026-09-16T04:13:29.519785+00:00",
+  "generated_at": "2026-09-23T13:49:22.336976+00:00",
   "market_regime": "TRENDING_STEADY",
-  "htf_zones": {
-    "resistance_zones": [
-      {
-        "id": "res_maj_1",
-        "high": 4341.22,
-        "low": 4337.93,
-        "significance": "MAJOR"
-      },
-      {
-        "id": "res_min_1",
-        "high": 4342.21,
-        "low": 4340.23,
-        "significance": "MINOR"
-      }
-    ],
-    "support_zones": [
-      {
-        "id": "sup_maj_1",
-        "high": 4278.77,
-        "low": 4275.48,
-        "significance": "MAJOR"
-      },
-      {
-        "id": "sup_min_1",
-        "high": 4311.78,
-        "low": 4309.81,
-        "significance": "MINOR"
-      }
-    ]
-  },
   "setups_enabled": {
     "TST": false,
     "BOF": false,
@@ -46,7 +16,7 @@
     "YUM_YUM": true
   },
   "execution_rules": {
-    "min_rr_ratio_part1": 1.0,
+    "min_rr_ratio_part1": 0.75,
     "require_wholesale_entry": true,
     "max_entry_timeout_bars_1m": 4,
     "stall_min_candles": 3,
@@ -59,11 +29,142 @@
     "part2_risk_percent": 0.5,
     "session_drawdown_timeout_percent": 2.0,
     "session_drawdown_hardstop_percent": 3.0,
-    "business_drawdown_stop_percent": 20.0
+    "business_drawdown_stop_percent": 20.0,
+    "min_rr_ratio": 0.75,
+    "sl_multiplier": 1.2,
+    "tp_multiplier": 0.9
   },
   "news_filter": {
-    "blackout_before_minutes": 15,
-    "blackout_after_minutes": 15,
-    "high_impact_events": []
+    "blackout_before_minutes": 20,
+    "blackout_after_minutes": 20,
+    "high_impact_events": [
+      {
+        "id": "ff_1790085300_564",
+        "title": "President Trump Speaks",
+        "country": "USD",
+        "impact": "MEDIUM",
+        "forecast": "",
+        "previous": "",
+        "timestamp": 1790085300.0,
+        "datetime_str": "2026-09-22 20:55:00",
+        "source": "ForexFactory"
+      },
+      {
+        "id": "ff_1790253000_294",
+        "title": "Unemployment Claims",
+        "country": "USD",
+        "impact": "MEDIUM",
+        "forecast": "201K",
+        "previous": "196K",
+        "timestamp": 1790253000.0,
+        "datetime_str": "2026-09-24 19:30:00",
+        "source": "ForexFactory"
+      },
+      {
+        "id": "ff_1790344800_3732",
+        "title": "Revised UoM Consumer Sentiment",
+        "country": "USD",
+        "impact": "MEDIUM",
+        "forecast": "47.4",
+        "previous": "47.8",
+        "timestamp": 1790344800.0,
+        "datetime_str": "2026-09-25 21:00:00",
+        "source": "ForexFactory"
+      },
+      {
+        "id": "ff_1790344800_683",
+        "title": "Revised UoM Inflation Expectations",
+        "country": "USD",
+        "impact": "MEDIUM",
+        "forecast": "",
+        "previous": "4.6%",
+        "timestamp": 1790344800.0,
+        "datetime_str": "2026-09-25 21:00:00",
+        "source": "ForexFactory"
+      }
+    ],
+    "blackout_windows": [
+      {
+        "event_id": "ff_1790085300_564",
+        "title": "President Trump Speaks",
+        "impact": "MEDIUM",
+        "start_ts": 1790084100.0,
+        "end_ts": 1790086500.0,
+        "event_ts": 1790085300.0,
+        "start_str": "2026-09-22 20:35:00",
+        "end_str": "2026-09-22 21:15:00",
+        "event_str": "2026-09-22 20:55:00"
+      },
+      {
+        "event_id": "ff_1790253000_294",
+        "title": "Unemployment Claims",
+        "impact": "MEDIUM",
+        "start_ts": 1790251800.0,
+        "end_ts": 1790254200.0,
+        "event_ts": 1790253000.0,
+        "start_str": "2026-09-24 19:10:00",
+        "end_str": "2026-09-24 19:50:00",
+        "event_str": "2026-09-24 19:30:00"
+      },
+      {
+        "event_id": "ff_1790344800_3732",
+        "title": "Revised UoM Consumer Sentiment",
+        "impact": "MEDIUM",
+        "start_ts": 1790343600.0,
+        "end_ts": 1790346000.0,
+        "event_ts": 1790344800.0,
+        "start_str": "2026-09-25 20:40:00",
+        "end_str": "2026-09-25 21:20:00",
+        "event_str": "2026-09-25 21:00:00"
+      },
+      {
+        "event_id": "ff_1790344800_683",
+        "title": "Revised UoM Inflation Expectations",
+        "impact": "MEDIUM",
+        "start_ts": 1790343600.0,
+        "end_ts": 1790346000.0,
+        "event_ts": 1790344800.0,
+        "start_str": "2026-09-25 20:40:00",
+        "end_str": "2026-09-25 21:20:00",
+        "event_str": "2026-09-25 21:00:00"
+      }
+    ],
+    "macro_bias": "NEUTRAL",
+    "lot_multiplier": 1.0
+  },
+  "session_tag": "NEW_YORK_20260923",
+  "htf_zones": {
+    "resistance_zones": [
+      {
+        "id": "res_maj_1",
+        "high": 4337.17,
+        "low": 4334.34,
+        "significance": "MAJOR",
+        "zone_type": "RESISTANCE"
+      },
+      {
+        "id": "res_min_1",
+        "high": 4295.26,
+        "low": 4293.56,
+        "significance": "MINOR",
+        "zone_type": "RESISTANCE"
+      }
+    ],
+    "support_zones": [
+      {
+        "id": "sup_maj_1",
+        "high": 4283.32,
+        "low": 4280.49,
+        "significance": "MAJOR",
+        "zone_type": "SUPPORT"
+      },
+      {
+        "id": "sup_min_1",
+        "high": 4281.0,
+        "low": 4278.17,
+        "significance": "MINOR",
+        "zone_type": "SUPPORT"
+      }
+    ]
   }
 }

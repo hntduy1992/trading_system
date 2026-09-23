@@ -1,6 +1,6 @@
 // YTC Price Action Trader - Web UI Client
-let chartM30, chartM3, chartM1;
-let seriesM30, seriesM3, seriesM1;
+let chartM15, chartM30, chartM3, chartM1;
+let seriesM15, seriesM30, seriesM3, seriesM1;
 let wsClient;
 let entryLine, slLine, tp1Line, tp2Line, lrpLine;
 let htfLines = [];
@@ -45,13 +45,16 @@ function initCharts() {
     }
   };
 
-  // M30 Chart
-  const elM30 = document.getElementById("chart-m30");
-  if (elM30 && window.LightweightCharts) {
-    chartM30 = LightweightCharts.createChart(elM30, { ...chartOpts, width: elM30.clientWidth, height: 290 });
-    seriesM30 = chartM30.addCandlestickSeries({
+  // HTF M15 Chart
+  const elM15 = document.getElementById("chart-m15") || document.getElementById("chart-m30");
+  if (elM15 && window.LightweightCharts) {
+    chartM15 = LightweightCharts.createChart(elM15, { ...chartOpts, width: elM15.clientWidth, height: 290 });
+    seriesM15 = chartM15.addCandlestickSeries({
       upColor: '#238636', downColor: '#da3633', borderVisible: false, wickUpColor: '#238636', wickDownColor: '#da3633'
     });
+    // Alias M30 to M15 for backward compatibility
+    chartM30 = chartM15;
+    seriesM30 = seriesM15;
   }
 
   // M3 Chart
@@ -73,9 +76,9 @@ function initCharts() {
   }
 
   window.addEventListener("resize", () => {
-    if (elM30 && chartM30) chartM30.applyOptions({ width: elM30.clientWidth });
-    if (elM3 && chartM3) chartM3.applyOptions({ width: elM3.clientWidth });
-    if (elM1 && chartM1) chartM1.applyOptions({ width: elM1.clientWidth });
+    if (elM15 && chartM15) chartM15.applyOptions({ width: elM15.clientWidth, height: elM15.clientHeight || 290 });
+    if (elM3 && chartM3 && elM3.clientWidth > 2) chartM3.applyOptions({ width: elM3.clientWidth });
+    if (elM1 && chartM1) chartM1.applyOptions({ width: elM1.clientWidth, height: elM1.clientHeight || 290 });
   });
 }
 
@@ -101,17 +104,19 @@ function cleanAndSortBars(bars) {
 
 async function loadInitialBars() {
   try {
-    const [resM30, resM3, resM1] = await Promise.all([
-      fetch(`${SERVER_A_URL}/api/bars?timeframe=M30&count=80`),
+    const [resHTF, resM3, resM1] = await Promise.all([
+      fetch(`${SERVER_A_URL}/api/bars?timeframe=M15&count=80`),
       fetch(`${SERVER_A_URL}/api/bars?timeframe=M3&count=100`),
       fetch(`${SERVER_A_URL}/api/bars?timeframe=M1&count=100`)
     ]);
 
-    if (resM30.ok && seriesM30) {
-      const data = await resM30.json();
+    const targetHTFSeries = seriesM15 || seriesM30;
+    const targetHTFChart = chartM15 || chartM30;
+    if (resHTF.ok && targetHTFSeries) {
+      const data = await resHTF.json();
       const cleaned = cleanAndSortBars(data);
-      seriesM30.setData(cleaned);
-      if (chartM30) chartM30.timeScale().fitContent();
+      targetHTFSeries.setData(cleaned);
+      if (targetHTFChart) targetHTFChart.timeScale().fitContent();
     }
     if (resM3.ok && seriesM3) {
       const data = await resM3.json();
@@ -134,6 +139,24 @@ async function loadInitialBars() {
   }
 }
 
+async function loadInitialConfig() {
+  try {
+    const res = await fetch(`${SERVER_A_URL}/api/config`);
+    if (res.ok) {
+      const cfg = await res.json();
+      if (cfg && cfg.htf_zones) {
+        updateHTFZonesOnChart(cfg);
+        const jsonArea = document.getElementById("ai-plan-json");
+        if (jsonArea && (!jsonArea.value || jsonArea.value.startsWith("Reasoning via") || jsonArea.value.trim().length === 0)) {
+          jsonArea.value = JSON.stringify(cfg, null, 2);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("Could not load initial session plan config:", e);
+  }
+}
+
 function updatePriceDisplay(price) {
   const badgeM1 = document.getElementById("badge-m1");
   if (badgeM1 && price) {
@@ -142,21 +165,25 @@ function updatePriceDisplay(price) {
 }
 
 function updateHTFZonesOnChart(config) {
-  if (!seriesM30 || !config || !config.htf_zones) return;
+  const targetSeries = seriesM15 || seriesM30;
+  if (!targetSeries || !config || !config.htf_zones) return;
   htfLines.forEach(l => {
-    try { seriesM30.removePriceLine(l); } catch(e){}
+    try { targetSeries.removePriceLine(l); } catch(e){}
   });
   htfLines = [];
 
   (config.htf_zones.resistance_zones || []).forEach(z => {
     try {
-      const l = seriesM30.createPriceLine({
-        price: (z.high + z.low) / 2,
+      const high = parseFloat(z.high);
+      const low = parseFloat(z.low);
+      const mid = (high + low) / 2.0;
+      const l = targetSeries.createPriceLine({
+        price: mid,
         color: '#da3633',
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `RES (${z.low}-${z.high})`,
+        title: `RES (${low.toFixed(2)}-${high.toFixed(2)})`,
       });
       htfLines.push(l);
     } catch(e){}
@@ -164,13 +191,16 @@ function updateHTFZonesOnChart(config) {
 
   (config.htf_zones.support_zones || []).forEach(z => {
     try {
-      const l = seriesM30.createPriceLine({
-        price: (z.high + z.low) / 2,
+      const high = parseFloat(z.high);
+      const low = parseFloat(z.low);
+      const mid = (high + low) / 2.0;
+      const l = targetSeries.createPriceLine({
+        price: mid,
         color: '#238636',
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `SUP (${z.low}-${z.high})`,
+        title: `SUP (${low.toFixed(2)}-${high.toFixed(2)})`,
       });
       htfLines.push(l);
     } catch(e){}
@@ -288,6 +318,19 @@ function updateRadarUI(radar) {
     elDist.textContent = `${d.toFixed(2)} USD (${(d * 10).toFixed(0)} pips)`;
   }
 
+  // Show lot sizes in radar-lots cell (new field in redesigned UI)
+  const elLots = document.getElementById("radar-lots");
+  if (elLots) {
+    const lots = radar.lots;
+    if (lots) {
+      elLots.textContent = `${lots.total || "--"} (${lots.p1 || "--"} / ${lots.p2 || "--"})`;
+    } else if (radar.lot_total) {
+      elLots.textContent = `${radar.lot_total}`;
+    } else {
+      elLots.textContent = "--";
+    }
+  }
+
   updateChartPriceLines(radar);
 }
 
@@ -317,9 +360,12 @@ function connectWebSocket() {
 function handleTelemetryMessage(msg) {
   if (msg.topic === "snapshot") {
     if (msg.bars) {
-      if (msg.bars.M30 && seriesM30) {
-        seriesM30.setData(cleanAndSortBars(msg.bars.M30));
-        chartM30.timeScale().fitContent();
+      const htfBars = msg.bars.M15 || msg.bars.M30;
+      const targetSeries = seriesM15 || seriesM30;
+      const targetChart = chartM15 || chartM30;
+      if (htfBars && targetSeries) {
+        targetSeries.setData(cleanAndSortBars(htfBars));
+        if (targetChart) targetChart.timeScale().fitContent();
       }
       if (msg.bars.M3 && seriesM3) {
         seriesM3.setData(cleanAndSortBars(msg.bars.M3));
@@ -332,6 +378,10 @@ function handleTelemetryMessage(msg) {
     }
     if (msg.config) {
       updateHTFZonesOnChart(msg.config);
+      const jsonArea = document.getElementById("ai-plan-json");
+      if (jsonArea && (!jsonArea.value || jsonArea.value.startsWith("Reasoning via") || jsonArea.value.trim().length === 0)) {
+        jsonArea.value = JSON.stringify(msg.config, null, 2);
+      }
     }
     if (msg.setup_radar) {
       updateRadarUI(msg.setup_radar);
@@ -350,8 +400,10 @@ function handleTelemetryMessage(msg) {
     if (tick.m3 && seriesM3) {
       seriesM3.update(tick.m3);
     }
-    if (tick.m30 && seriesM30) {
-      seriesM30.update(tick.m30);
+    const htfTick = tick.m15 || tick.m30;
+    const targetSeries = seriesM15 || seriesM30;
+    if (htfTick && targetSeries) {
+      targetSeries.update(htfTick);
     }
     return;
   }
@@ -363,6 +415,15 @@ function handleTelemetryMessage(msg) {
 
   if (msg.topic === "telemetry" || msg.topic === "trade_opened" || msg.topic === "emergency") {
     const payload = msg.payload || msg;
+    if (payload && (payload.type === "SESSION_PLAN_RELOADED" || payload.type === "PLAN_DEPLOYED")) {
+      if (payload.config) {
+        updateHTFZonesOnChart(payload.config);
+        const jsonArea = document.getElementById("ai-plan-json");
+        if (jsonArea) jsonArea.value = JSON.stringify(payload.config, null, 2);
+      } else {
+        loadInitialConfig();
+      }
+    }
     if (payload && payload.type === "AI_PRE_ENTRY_EVALUATING") {
       logTelemetry(`🤖 [AI GATEKEEPER] Đang đánh giá điểm vào lệnh ${payload.symbol} ${payload.side} @ ${payload.entry} (Model: ${payload.model || 'AI'})...`);
     } else if (payload && payload.type === "AI_ENTRY_APPROVED") {
@@ -475,14 +536,12 @@ async function fetchPositions() {
         const ticket = t.part1.ticket || t.limit_order_ticket || 0;
         return `
         <tr>
-          <td><code>${t.trade_id}</code></td>
-          <td><strong>${t.setup}</strong></td>
+          <td><code style="font-size:10px; color:#8b949e;">${t.trade_id}</code><br><strong>${t.setup}</strong></td>
           <td style="color:${t.side === 'BUY' ? '#238636' : '#da3633'}"><strong>${t.side}</strong></td>
           <td><span style="background:#21262d; padding:2px 6px; border-radius:4px; font-size:11px;">${t.state}</span></td>
-          <td>${t.part1.lot_size} / ${t.part2.lot_size}</td>
+          <td><strong>${(t.part1.lot_size + (t.part2 && t.part2.lot_size ? t.part2.lot_size : 0)).toFixed(2)}</strong>${t.part2 && t.part2.lot_size > 0 ? `<br><span style="color:#8b949e; font-size:10px;">(${t.part1.lot_size} / ${t.part2.lot_size})</span>` : ''}</td>
           <td>${t.part1.entry_price.toFixed(2)}</td>
-          <td style="color:#da3633;">${t.part1.sl_price.toFixed(2)}</td>
-          <td style="color:#238636;">${t.part1.tp_price.toFixed(2)}</td>
+          <td><span style="color:#da3633;">${t.part1.sl_price.toFixed(2)}</span> / <span style="color:#238636;">${t.part1.tp_price.toFixed(2)}</span></td>
           <td>
             <div style="display:flex; gap:4px;">
               <button class="btn btn-primary" style="padding:2px 6px; font-size:10px;" onclick="openModifyModal(${ticket}, ${t.part1.sl_price}, ${t.part1.tp_price}, '${t.trade_id}')">Sửa SL/TP</button>
@@ -647,6 +706,53 @@ async function fetchTradeHistory() {
     }
   } catch (e) {
     console.error("fetchTradeHistory error:", e);
+  }
+}
+
+async function clearTradeHistory() {
+  if (!confirm("⚠️ Bạn có chắc chắn muốn XÓA TOÀN BỘ nhật ký lệnh đã đóng trong phiên?")) {
+    return;
+  }
+  try {
+    const res = await fetch(`${SERVER_A_URL}/api/trades/history/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      logTelemetry(`🗑️ [TRADES] ${data.message || 'Đã xóa nhật ký lệnh đã đóng.'}`);
+      await fetchTradeHistory();
+      alert("✅ Đã xóa sạch nhật ký lệnh đã đóng!");
+    } else {
+      alert("❌ Lỗi khi yêu cầu xóa nhật ký từ Server A.");
+    }
+  } catch (e) {
+    alert(`❌ Lỗi kết nối Server A: ${e.message}`);
+  }
+}
+
+async function clearLessonsAndRules() {
+  if (!confirm("⚠️ Bạn có chắc chắn muốn XÓA TOÀN BỘ bài học kinh nghiệm (Vector RAG) và quy tắc kiểm toán đã tích lũy?")) {
+    return;
+  }
+  try {
+    const res = await fetch(`${SERVER_B_URL}/api/lessons/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      logTelemetry(`🗑️ [LESSONS] ${data.message || 'Đã xóa toàn bộ bài học kinh nghiệm.'}`);
+      const out = document.getElementById("audit-output");
+      if (out) {
+        out.innerHTML = `<div style="color:#3fb950; text-align:center; padding:20px;">✅ Toàn bộ bài học kinh nghiệm và quy tắc kiểm toán đã được dọn sạch.</div>`;
+      }
+      alert("✅ Đã xóa sạch toàn bộ bài học kinh nghiệm và rules kiểm toán!");
+    } else {
+      alert("❌ Lỗi khi yêu cầu xóa bài học từ Server B.");
+    }
+  } catch (e) {
+    alert(`❌ Lỗi kết nối Server B: ${e.message}`);
   }
 }
 
@@ -1481,6 +1587,7 @@ async function triggerNewsAnalysis() {
 window.addEventListener("DOMContentLoaded", () => {
   initCharts();
   loadInitialBars();
+  loadInitialConfig();
   connectWebSocket();
   fetchStatus();
   fetchPositions();

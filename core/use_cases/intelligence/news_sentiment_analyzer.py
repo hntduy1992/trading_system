@@ -25,6 +25,7 @@ class NewsSentimentAnalyzerUseCase:
         symbol: str = "XAUUSD",
         blackout_before_minutes: int = 20,
         blackout_after_minutes: int = 20,
+        include_medium_impact: bool = True,
         force_refresh: bool = False
     ) -> Dict[str, Any]:
         """
@@ -41,7 +42,7 @@ class NewsSentimentAnalyzerUseCase:
         calendar_events = self.news_fetcher.fetch_economic_calendar(force_refresh=force_refresh)
         macro_news = self.news_fetcher.fetch_macro_gold_news(force_refresh=force_refresh)
 
-        # 2. Build Blackout Windows for High Impact Events
+        # 2. Build Blackout Windows for High & Key Medium Impact Events
         blackout_windows = []
         next_high_event = None
         min_future_diff = float("inf")
@@ -50,13 +51,15 @@ class NewsSentimentAnalyzerUseCase:
             ev_ts = ev.get("timestamp", 0.0)
             impact = ev.get("impact", "LOW")
             
-            # Blackout applies strictly to HIGH impact USD events
-            if impact == "HIGH":
+            # Blackout applies strictly to HIGH impact USD events and key/all MEDIUM USD events
+            is_blackout_event = (impact == "HIGH") or (include_medium_impact and impact == "MEDIUM")
+            if is_blackout_event:
                 start_ts = ev_ts - (blackout_before_minutes * 60)
                 end_ts = ev_ts + (blackout_after_minutes * 60)
                 blackout_windows.append({
                     "event_id": ev.get("id"),
                     "title": ev.get("title"),
+                    "impact": impact,
                     "start_ts": start_ts,
                     "end_ts": end_ts,
                     "event_ts": ev_ts,
@@ -65,7 +68,7 @@ class NewsSentimentAnalyzerUseCase:
                     "event_str": ev.get("datetime_str", "")
                 })
 
-            # Track next upcoming high impact event
+            # Track next upcoming high/medium impact event
             if ev_ts > now:
                 diff = ev_ts - now
                 if diff < min_future_diff and impact in ["HIGH", "MEDIUM"]:
@@ -75,10 +78,12 @@ class NewsSentimentAnalyzerUseCase:
         # 3. Check if currently in blackout
         is_in_blackout = False
         active_blackout_reason = ""
+        active_event_title = ""
         for bw in blackout_windows:
             if bw["start_ts"] <= now <= bw["end_ts"]:
                 is_in_blackout = True
-                active_blackout_reason = f"Đang trong cửa sổ né tin đỏ: {bw['title']} ({bw['start_str']} -> {bw['end_str']})"
+                active_event_title = bw.get("title", "")
+                active_blackout_reason = f"Đang trong cửa sổ né tin {bw.get('impact', '')}: {bw['title']} ({bw['start_str']} -> {bw['end_str']})"
                 break
 
         # 4. Synthesize Macro Bias & Lot Sizing Recommendation
@@ -119,13 +124,16 @@ class NewsSentimentAnalyzerUseCase:
         """Refreshes real-time blackout flag without re-calling heavy AI."""
         is_in_blackout = False
         reason = ""
+        active_title = ""
         for bw in analysis.get("blackout_windows", []):
             if bw["start_ts"] <= now <= bw["end_ts"]:
                 is_in_blackout = True
-                reason = f"Đang trong cửa sổ né tin đỏ: {bw['title']} ({bw['start_str']} -> {bw['end_str']})"
+                active_title = bw.get("title", "")
+                reason = f"Đang trong cửa sổ né tin {bw.get('impact', '')}: {bw['title']} ({bw['start_str']} -> {bw['end_str']})"
                 break
         analysis["is_in_blackout"] = is_in_blackout
         analysis["active_blackout_reason"] = reason
+        analysis["active_event_title"] = active_title
 
         # Refresh next event minutes left
         next_ev = analysis.get("next_event")
@@ -135,6 +143,19 @@ class NewsSentimentAnalyzerUseCase:
                     left = (bw["event_ts"] - now) / 60
                     next_ev["minutes_left"] = round(left, 1) if left > 0 else 0.0
                     break
+
+    def check_blackout_status(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """Synchronous fast check of current news blackout status against cached windows."""
+        now = now or time.time()
+        if self.last_analysis_result:
+            self._refresh_live_blackout_state(self.last_analysis_result, now)
+            return {
+                "is_in_blackout": self.last_analysis_result.get("is_in_blackout", False),
+                "reason": self.last_analysis_result.get("active_blackout_reason", ""),
+                "title": self.last_analysis_result.get("active_event_title", ""),
+                "blackout_windows": self.last_analysis_result.get("blackout_windows", [])
+            }
+        return {"is_in_blackout": False, "reason": "", "title": "", "blackout_windows": []}
 
     async def _synthesize_macro_bias(
         self,

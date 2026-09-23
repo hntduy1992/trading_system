@@ -32,6 +32,12 @@ class TestHindsightAudit(unittest.TestCase):
             "risk_management": {"account_risk_limit_percent": 1.0}
         }
 
+    def tearDown(self):
+        # Dọn dẹp rules file phát sinh trong test để không làm ảnh hưởng test khác
+        from infrastructure.storage.json_lesson_rules import JsonLessonRulesStore
+        store = JsonLessonRulesStore()
+        store.clear()
+
     def test_trade_lifecycle_context_fields(self):
         """Test TradeLifecycle holds entry_context and close_context correctly."""
         trade = TradeLifecycle(

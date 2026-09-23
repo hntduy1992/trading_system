@@ -109,7 +109,11 @@ class TestCandlestickEngine(unittest.TestCase):
         self.assertTrue(triggered)
         self.assertEqual(side, OrderSide.BUY)
         self.assertEqual(entry, 126.1) # Bar1.high + tick_size
-        self.assertEqual(sl, 116.9)    # Bar1.low - tick_size
+        # SL mới: sl_buffer = max(tick_size*20, bar1_range*0.25)
+        # bar1: high=126.0, low=117.0, range=9.0
+        # sl_buffer = max(0.1*20, 9.0*0.25) = max(2.0, 2.25) = 2.25
+        # sl = 117.0 - 2.25 = 114.75
+        self.assertAlmostEqual(sl, 114.75, places=2)
         self.assertEqual(max_bars, 1)  # Strict 1-bar expiry
 
     def test_module5_yum_yum_buy(self):

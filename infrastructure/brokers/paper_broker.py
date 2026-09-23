@@ -22,6 +22,7 @@ class PaperBroker(IBrokerGateway):
         self._bars_cache: Dict[str, List[Bar]] = {
             "M1": [],
             "M3": [],
+            "M15": [],
             "M30": []
         }
         self._generate_initial_data()
@@ -30,10 +31,23 @@ class PaperBroker(IBrokerGateway):
         now = int(time.time())
         m1_now = (now // 60) * 60
         m3_now = (now // 180) * 180
+        m15_now = (now // 900) * 900
         m30_now = (now // 1800) * 1800
 
         base_price = self.profile.base_price
         vol_scale = base_price * 0.001
+
+        # Generate 100 M15 bars
+        m15_price = base_price
+        for i in range(100, 0, -1):
+            t = m15_now - i * 900
+            drift = (random.random() - 0.5) * vol_scale * 1.5
+            o = round(m15_price, self.profile.digits)
+            c = round(o + drift, self.profile.digits)
+            h = round(max(o, c) + random.random() * vol_scale * 0.8, self.profile.digits)
+            l = round(min(o, c) - random.random() * vol_scale * 0.8, self.profile.digits)
+            self._bars_cache["M15"].append(Bar(float(t), o, h, l, c, 1000, "M15"))
+            m15_price = c
 
         # Generate 100 M30 bars
         m30_price = base_price
@@ -113,6 +127,22 @@ class PaperBroker(IBrokerGateway):
             m3_bars.append(new_m3)
             if len(m3_bars) > 200:
                 m3_bars.pop(0)
+
+        # Update M15 forming bar
+        m15_time = (now // 900) * 900
+        m15_bars = self._bars_cache.get("M15")
+        if m15_bars is not None:
+            if m15_bars and int(m15_bars[-1].timestamp) == m15_time:
+                last = m15_bars[-1]
+                last.high = round(max(last.high, c_price), self.profile.digits)
+                last.low = round(min(last.low, c_price), self.profile.digits)
+                last.close = c_price
+                last.volume += 1
+            else:
+                new_m15 = Bar(float(m15_time), o_price, max(o_price, c_price), min(o_price, c_price), c_price, 1, "M15")
+                m15_bars.append(new_m15)
+                if len(m15_bars) > 150:
+                    m15_bars.pop(0)
 
         # Update M30 forming bar
         m30_time = (now // 1800) * 1800
@@ -205,6 +235,47 @@ class PaperBroker(IBrokerGateway):
             self.orders[ticket]["tp"] = tp
             return True
         return False
+
+    async def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        res = []
+        for ticket, pos in self.orders.items():
+            if pos.get("type") == "MARKET" and pos.get("status") == "OPEN":
+                if not symbol or pos.get("symbol") == symbol:
+                    res.append({
+                        "ticket": ticket,
+                        "symbol": pos.get("symbol", self.symbol),
+                        "type": pos.get("side", OrderSide.BUY).value if hasattr(pos.get("side"), "value") else str(pos.get("side")),
+                        "volume": pos.get("volume", 0.02),
+                        "price_open": pos.get("price", self._current_price),
+                        "sl": pos.get("sl", 0.0),
+                        "tp": pos.get("tp", 0.0),
+                        "price_current": self._current_price,
+                        "profit": 0.0,
+                        "time": time.time(),
+                        "magic": 2102026,
+                        "comment": pos.get("comment", "")
+                    })
+        return res
+
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        res = []
+        for ticket, pos in self.orders.items():
+            if pos.get("type") in ["LIMIT", "STOP"] and pos.get("status") == "OPEN":
+                if not symbol or pos.get("symbol") == symbol:
+                    res.append({
+                        "ticket": ticket,
+                        "symbol": pos.get("symbol", self.symbol),
+                        "type": pos.get("type"),
+                        "volume_initial": pos.get("volume", 0.02),
+                        "volume_current": pos.get("volume", 0.02),
+                        "price_open": pos.get("price", self._current_price),
+                        "sl": pos.get("sl", 0.0),
+                        "tp": pos.get("tp", 0.0),
+                        "time_setup": time.time(),
+                        "magic": 2102026,
+                        "comment": pos.get("comment", "")
+                    })
+        return res
 
     async def get_terminal_status(self) -> Dict[str, Any]:
         return {

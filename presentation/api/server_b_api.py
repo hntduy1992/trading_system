@@ -17,6 +17,7 @@ from infrastructure.storage.json_store import LocalJsonStore
 from infrastructure.ai.gemini_adapter import GeminiAIAdapter
 from infrastructure.ai.openai_adapter import OpenAIAdapter
 from core.use_cases.intelligence.news_sentiment_analyzer import NewsSentimentAnalyzerUseCase
+from core.domain.models import session_config_to_dict
 
 class PlanRequest(BaseModel):
     symbol: str = "XAUUSD"
@@ -257,20 +258,7 @@ def create_server_b_app(
     async def generate_plan(req: PlanRequest):
         try:
             config = await planner.execute(symbol=req.symbol, economic_events=req.economic_events)
-            config_dict = {
-                "session_id": config.session_id,
-                "symbol": config.symbol,
-                "generated_at": config.generated_at,
-                "market_regime": config.market_regime.value,
-                "htf_zones": {
-                    "resistance_zones": [{"id": z.id, "high": z.high, "low": z.low, "significance": z.significance.value} for z in config.resistance_zones],
-                    "support_zones": [{"id": z.id, "high": z.high, "low": z.low, "significance": z.significance.value} for z in config.support_zones]
-                },
-                "setups_enabled": config.setups_enabled,
-                "execution_rules": config.execution_rules,
-                "risk_management": config.risk_management,
-                "news_filter": config.news_filter
-            }
+            config_dict = session_config_to_dict(config)
             json_store.save_session_config(config_dict)
             return {"status": "SUCCESS", "config": config_dict}
         except Exception as e:
@@ -320,6 +308,45 @@ def create_server_b_app(
     async def get_lessons(query: str = "general", regime: str = "GENERAL", limit: int = 5):
         lessons = await vector_store.search_lessons(query=query, regime=regime, limit=limit)
         return {"lessons": lessons}
+
+    @app.post("/api/lessons/clear")
+    @app.post("/api/rag/lessons/clear")
+    async def clear_lessons():
+        """Xóa toàn bộ bài học kinh nghiệm (Vector RAG), LessonRules JSON và báo cáo audit gần nhất."""
+        try:
+            # 1. Clear in-memory Vector Store
+            if hasattr(vector_store, "_documents"):
+                vector_store._documents.clear()
+            if hasattr(vector_store, "_lesson_rules_raw"):
+                vector_store._lesson_rules_raw.clear()
+
+            # 2. Clear persisted JSON Lesson Rules
+            try:
+                from infrastructure.storage.json_lesson_rules import JsonLessonRulesStore
+                JsonLessonRulesStore().clear()
+            except Exception as e:
+                print(f"[Server B] Could not clear JsonLessonRulesStore: {e}")
+
+            # 3. Clear data files (session_lessons.json, last_audit_report.json)
+            if json_store:
+                for fname in ["session_lessons.json", "last_audit_report.json"]:
+                    fpath = os.path.join(json_store.data_dir, fname)
+                    if os.path.exists(fpath):
+                        try:
+                            os.remove(fpath)
+                        except Exception as e:
+                            print(f"[Server B] Could not remove {fname}: {e}")
+
+            # 4. Clear compiled rules in evaluate_entry if available
+            if evaluate_entry and hasattr(evaluate_entry, "compiled_lesson_rules"):
+                evaluate_entry.compiled_lesson_rules = []
+
+            return {
+                "status": "SUCCESS",
+                "message": "Đã xóa sạch toàn bộ bài học kinh nghiệm (Vector RAG) và quy tắc kiểm toán."
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Lỗi khi xóa bài học kinh nghiệm: {e}")
 
     # =========================================================================
     # GOLD MACRO NEWS & BLACKOUT ENGINE ENDPOINTS

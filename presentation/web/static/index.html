@@ -1,14 +1,15 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YTC Price Action Trader (v2.1.0-STRICT)</title>
   <link rel="stylesheet" href="styles.css" />
-  <!-- Lightweight Charts (TradingView) for ultra-fast multi-timeframe charts -->
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
+
+  <!-- ===== HEADER ===== -->
   <header>
     <div class="logo-area">
       <h2>YTC Price Action Trader</h2>
@@ -18,7 +19,7 @@
     <div class="status-bar">
       <div class="status-item">
         <span class="status-label">Symbol:</span>
-        <span id="stat-symbol" class="status-val">EURUSD</span>
+        <span id="stat-symbol" class="status-val">XAUUSD</span>
       </div>
       <div class="status-item">
         <span class="status-label">Mode:</span>
@@ -30,265 +31,322 @@
       </div>
       <div class="status-item">
         <span class="status-label">Regime:</span>
-        <span id="stat-regime" class="status-val">SIDEWAYS_RANGE</span>
+        <span id="stat-regime" class="status-val">--</span>
       </div>
       <div class="status-item">
-        <span class="status-label">Port:</span>
-        <span class="status-val">A: 29120 | B: 29121</span>
+        <span class="status-label">AlgoTrading:</span>
+        <span id="stat-autotrading-badge" class="status-val badge-neutral">CHECKING...</span>
       </div>
-      <div class="status-item" style="display:flex; align-items:center;">
-        <span class="status-label">AutoTrading:</span>
-        <span id="stat-autotrading-badge" class="status-val" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #21262d; border: 1px solid #30363d;">CHECKING...</span>
-      </div>
-      <div class="status-item" style="display:flex; align-items:center;">
-        <span class="status-label">News Radar:</span>
-        <span id="stat-news-badge" class="status-val" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #238636; color:#fff; border: 1px solid #2ea043;">🟢 AN TOÀN</span>
+      <div class="status-item">
+        <span class="status-label">News:</span>
+        <span id="stat-news-badge" class="status-val badge-safe">🟢 AN TOÀN</span>
       </div>
     </div>
 
     <nav class="tab-nav">
-      <button class="tab-btn active" onclick="switchTab('server-a')">Server A (Execution)</button>
-      <button class="tab-btn" onclick="switchTab('server-b')">Server B (AI Brain & Audit)</button>
+      <button class="tab-btn active" onclick="switchTab('server-a')">📊 Execution</button>
+      <button class="tab-btn" onclick="switchTab('server-b')">🧠 AI Brain</button>
     </nav>
   </header>
 
   <main>
-    <!-- TAB 1: SERVER A (EXECUTION & LIVE MONITOR) -->
+    <!-- ===== TAB 1: SERVER A — 2-COLUMN LAYOUT ===== -->
     <div id="tab-server-a" class="tab-pane active">
-      <!-- Cảnh báo trạng thái AutoTrading khi bị tắt -->
-      <div id="autotrading-warning-banner" style="display:none; background: #3b1219; border: 1px solid #da3633; color: #f85149; padding: 10px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; align-items: center; justify-content: space-between;">
-        <div style="display:flex; align-items:center; gap: 10px;">
-          <span style="font-size: 18px;">⚠️</span>
+
+      <!-- AutoTrading warning banner -->
+      <div id="autotrading-warning-banner" style="display:none;" class="warning-banner">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:18px;">⚠️</span>
           <div>
             <strong id="autotrading-warning-title">CẢNH BÁO: TÍNH NĂNG TỰ ĐỘNG GIAO DỊCH ĐANG BỊ TẮT!</strong>
-            <div id="autotrading-warning-desc" style="color: #c9d1d9; font-size: 12px; margin-top: 2px;">Vui lòng bấm vào nút 'Algo Trading' trên thanh công cụ phần mềm MT5 (chuyển sang màu Xanh lá) để bot có thể tự động vào lệnh.</div>
+            <div id="autotrading-warning-desc" style="color:#c9d1d9; font-size:12px; margin-top:2px;">
+              Vui lòng bật nút 'Algo Trading' trên MT5 (màu xanh lá) để bot có thể vào lệnh.
+            </div>
           </div>
         </div>
-        <button onclick="fetchStatus()" style="background:#21262d; border:1px solid #da3633; color:#f85149; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:11px;">Kiểm tra lại</button>
+        <button onclick="fetchStatus()" class="btn btn-danger" style="padding:4px 10px; font-size:11px;">Kiểm tra lại</button>
       </div>
 
-      <!-- 3-Pane Synchronized Charts -->
-      <div class="charts-grid">
-        <div class="chart-card">
-          <div class="chart-header">
-            <span>HTF (M30) - Trend & S/R Zones</span>
-            <span id="badge-m30" style="color:#58a6ff;">SYNCED</span>
-          </div>
-          <div id="chart-m30" class="chart-container"></div>
-        </div>
+      <!-- ===== 2-COLUMN MAIN GRID ===== -->
+      <div class="main-grid">
 
-        <div class="chart-card">
-          <div class="chart-header">
-            <span>TTF (M3) - Trading Framework (Swings)</span>
-            <span id="badge-m3" style="color:#238636;">ACTIVE</span>
-          </div>
-          <div id="chart-m3" class="chart-container"></div>
-        </div>
+        <!-- ========== LEFT COLUMN: Charts + Radar ========== -->
+        <div class="left-col">
 
-        <div class="chart-card">
-          <div class="chart-header">
-            <span>LTF (M1) - Micro Triggers (Stall/Wholesale)</span>
-            <span id="badge-m1" style="color:#e3b341;">STREAMING</span>
-          </div>
-          <div id="chart-m1" class="chart-container"></div>
-        </div>
-      </div>
-
-      <!-- Wholesale Order Radar (Vùng Theo Dõi Kỳ Vọng Khớp Lệnh) -->
-      <div class="card" style="margin-bottom: 2px; padding: 10px 14px; background: #161b22; border: 1px solid #30363d;">
-        <div class="card-title" style="margin-bottom: 6px;">
-          <span>🎯 VÙNG THEO DÕI KHỚP LỆNH KỲ VỌNG (WHOLESALE ORDER RADAR)</span>
-          <span id="radar-status-badge" style="background:#21262d; border: 1px solid #58a6ff; color:#58a6ff; padding:2px 8px; border-radius:4px; font-size:11px;">SCANNING</span>
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; font-size: 12px; align-items: center;">
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #58a6ff;">
-            <div style="color:#8b949e; font-size:10px;">SETUP CANH VÀO</div>
-            <div id="radar-setup" style="font-weight:bold; color:#f0f6fc;">--</div>
-          </div>
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #58a6ff;">
-            <div style="color:#8b949e; font-size:10px;">GIÁ KỲ VỌNG (ENTRY)</div>
-            <div id="radar-entry" style="font-weight:bold; color:#58a6ff;">--</div>
-          </div>
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #da3633;">
-            <div style="color:#8b949e; font-size:10px;">DỪNG LỖ (SL - S1)</div>
-            <div id="radar-sl" style="font-weight:bold; color:#da3633;">--</div>
-          </div>
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #238636;">
-            <div style="color:#8b949e; font-size:10px;">CHỐT LỜI 1 (TP1)</div>
-            <div id="radar-tp1" style="font-weight:bold; color:#238636;">--</div>
-          </div>
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #3fb950;">
-            <div style="color:#8b949e; font-size:10px;">CHỐT LỜI 2 (TP2 HTF)</div>
-            <div id="radar-tp2" style="font-weight:bold; color:#3fb950;">--</div>
-          </div>
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #bc8cff;">
-            <div style="color:#8b949e; font-size:10px;">TRẦN R:R (LRP)</div>
-            <div id="radar-lrp" style="font-weight:bold; color:#bc8cff;">--</div>
-          </div>
-          <div style="background:#0d1117; padding:6px 10px; border-radius:6px; border-left:3px solid #e3b341;">
-            <div style="color:#8b949e; font-size:10px;">KHOẢNG CÁCH VÀO</div>
-            <div id="radar-dist" style="font-weight:bold; color:#e3b341;">--</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Lower Controls & Position Matrix -->
-      <div class="lower-grid">
-
-        <div class="card">
-          <div class="card-title">
-            <span>Active Positions & Orders Matrix</span>
-            <span id="position-count">0 Open</span>
-          </div>
-          <div style="overflow-x:auto; flex:1;">
-            <table id="positions-table">
-              <thead>
-                <tr>
-                  <th>Trade ID</th>
-                  <th>Setup</th>
-                  <th>Side</th>
-                  <th>State</th>
-                  <th>Lots (P1/P2)</th>
-                  <th>Entry</th>
-                  <th>SL</th>
-                  <th>TP</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody id="positions-tbody">
-                <tr><td colspan="9" style="text-align:center; color:#8b949e;">No active positions. Engine scanning for wholesale setups...</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Emergency & Manual Execution Panel -->
-          <div class="emergency-row" style="flex-wrap: wrap; align-items:center;">
-            <button class="btn btn-danger" onclick="panicCloseAll()">🚨 PANIC CLOSE ALL</button>
-            <button id="btn-pause" class="btn btn-warning" onclick="togglePause()">⏸ PAUSE NEW ENTRIES</button>
-            <button class="btn btn-primary" onclick="simulateTick()">⚡ SIMULATE TICK (TEST)</button>
-            <button class="btn btn-success" onclick="openOrderModal('BUY')">🟢 MỞ LỆNH BUY</button>
-            <button class="btn btn-danger" onclick="openOrderModal('SELL')">🔴 MỞ LỆNH SELL</button>
-          </div>
-        </div>
-
-        <!-- Nhật ký Giao dịch Đã đóng (Closed Trades & Context) -->
-        <div class="card">
-          <div class="card-title">
-            <span>📖 Nhật ký Giao dịch & Hoàn cảnh vào lệnh (Closed Trades Journal)</span>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span id="history-count" style="font-size:11px; color:#8b949e;">0 Closed</span>
-              <button class="btn btn-primary" style="padding:2px 8px; font-size:11px;" onclick="fetchTradeHistory()">🔄 Làm mới</button>
+          <!-- M15 Chart -->
+          <div class="chart-card">
+            <div class="chart-header">
+              <span>📈 HTF M15 — Trend &amp; S/R Zones</span>
+              <span id="badge-m15" class="badge-synced">SYNCED</span>
             </div>
+            <div id="chart-m15" class="chart-container"></div>
+            <!-- Hidden backward-compat elements -->
+            <div id="chart-m30" style="display:none; width:1px; height:1px;"></div>
+            <span id="badge-m30" style="display:none;"></span>
           </div>
-          <div style="overflow-x:auto; max-height:230px; flex:1;">
-            <table id="history-table">
-              <thead>
-                <tr>
-                  <th>Trade ID</th>
-                  <th>Thời gian vào</th>
-                  <th>Setup & Bối cảnh</th>
-                  <th>Side</th>
-                  <th>Giá vào</th>
-                  <th>SL / TP1</th>
-                  <th>Vùng Wholesale (LWP/LRP)</th>
-                  <th>Kết quả</th>
-                  <th>Lý do thoát lệnh</th>
-                </tr>
-              </thead>
-              <tbody id="history-tbody">
-                <tr><td colspan="9" style="text-align:center; color:#8b949e;">Chưa có lệnh hoàn tất nào trong phiên.</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
 
-        <!-- Cấu hình Khối lượng & Quản lý Rủi ro (Tự động hoặc Thủ công) -->
-        <div class="card" style="margin-bottom: 2px;">
-          <div class="card-title">
-            <span>⚙️ CẤU HÌNH KHỐI LƯỢNG (VOLUME) & SL / TP (THỦ CÔNG / GỢI Ý)</span>
-            <span id="risk-mode-badge" style="background:#21262d; border:1px solid #3fb950; color:#3fb950; padding:2px 8px; border-radius:4px; font-size:11px;">AUTO CALCULATED</span>
+          <!-- M1 Chart -->
+          <div class="chart-card">
+            <div class="chart-header">
+              <span>⚡ LTF M1 — Micro Trigger (Stall / Wholesale)</span>
+              <span id="badge-m1" class="badge-streaming">STREAMING</span>
+            </div>
+            <div id="chart-m1" class="chart-container"></div>
+            <!-- Hidden M3 chart (still rendered for data, not shown) -->
+            <div id="chart-m3" style="display:none; width:1px; height:1px;"></div>
+            <span id="badge-m3" style="display:none;"></span>
           </div>
-          <div style="font-size: 12px; color: #8b949e; margin-bottom: 6px;">
-            Bạn có thể chọn <strong>dùng thông số hệ thống tự động tính toán (Gợi ý)</strong> hoặc <strong>cố định khối lượng Lot / SL / TP bằng tay</strong>.
-          </div>
-          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 12px; align-items: center;">
-            <div>
-              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
-                <label style="color:#8b949e;">Khối lượng Lot (Volume):</label>
-                <button type="button" class="badge-btn" onclick="applySuggestedLot()">Gợi ý</button>
+
+          <!-- Order Radar: Entry Expectations -->
+          <div class="card radar-card">
+            <div class="card-title">
+              <span>🎯 KỲ VỌNG VÀO LỆNH (WHOLESALE ORDER RADAR)</span>
+              <span id="radar-status-badge" class="badge-scanning">SCANNING</span>
+            </div>
+
+            <!-- Radar Grid: 4 key values -->
+            <div class="radar-grid">
+              <div class="radar-cell blue">
+                <div class="radar-label">SETUP</div>
+                <div id="radar-setup" class="radar-val">--</div>
               </div>
-              <input id="cfg-volume-input" class="form-control" type="number" step="0.01" placeholder="Auto (1% rủi ro)" />
-            </div>
-            <div>
-              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
-                <label style="color:#8b949e;">% Rủi ro mỗi lệnh (%):</label>
-                <button type="button" class="badge-btn" onclick="document.getElementById('cfg-risk-pct-input').value = '1.0'">1.0%</button>
+              <div class="radar-cell blue">
+                <div class="radar-label">GIÁ VÀO (ENTRY)</div>
+                <div id="radar-entry" class="radar-val" style="color:#58a6ff;">--</div>
               </div>
-              <input id="cfg-risk-pct-input" class="form-control" type="number" step="0.1" placeholder="1.0%" />
-            </div>
-            <div>
-              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
-                <label style="color:#8b949e;">Dừng lỗ cố định (SL):</label>
-                <button type="button" class="badge-btn" onclick="applySuggestedSL()">Gợi ý</button>
+              <div class="radar-cell red">
+                <div class="radar-label">DỪNG LỖ (SL)</div>
+                <div id="radar-sl" class="radar-val" style="color:#f85149;">--</div>
               </div>
-              <input id="cfg-sl-input" class="form-control" type="number" step="0.01" placeholder="Auto (Kỹ thuật S1)" />
-            </div>
-            <div>
-              <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
-                <label style="color:#8b949e;">Chốt lời cố định (TP1):</label>
-                <button type="button" class="badge-btn" onclick="applySuggestedTP()">Gợi ý</button>
+              <div class="radar-cell green">
+                <div class="radar-label">CHỐT LỜI T1</div>
+                <div id="radar-tp1" class="radar-val" style="color:#3fb950;">--</div>
               </div>
-              <input id="cfg-tp-input" class="form-control" type="number" step="0.01" placeholder="Auto (Mục tiêu T1)" />
+              <div class="radar-cell green">
+                <div class="radar-label">MỤC TIÊU T2</div>
+                <div id="radar-tp2" class="radar-val" style="color:#56d364;">--</div>
+              </div>
+              <div class="radar-cell purple">
+                <div class="radar-label">TRẦN R:R (LRP)</div>
+                <div id="radar-lrp" class="radar-val" style="color:#bc8cff;">--</div>
+              </div>
+              <div class="radar-cell yellow">
+                <div class="radar-label">KHOẢNG CÁCH VÀO</div>
+                <div id="radar-dist" class="radar-val" style="color:#e3b341;">--</div>
+              </div>
+              <div class="radar-cell" style="border-left:3px solid #30363d;">
+                <div class="radar-label">LOT (P1 / P2)</div>
+                <div id="radar-lots" class="radar-val" style="color:#f0f6fc;">--</div>
+              </div>
             </div>
-          </div>
 
-          <!-- AI Gatekeeper Pre-Entry Evaluation Setting -->
-          <div style="margin-top: 10px; padding: 8px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <input type="checkbox" id="cfg-ai-pre-entry-input" checked style="cursor:pointer; width:16px; height:16px;" />
-              <label for="cfg-ai-pre-entry-input" style="font-size: 12px; font-weight: 600; color: #f0f6fc; cursor:pointer;">
-                🛡️ AI Pre-Entry Gatekeeper (Đánh giá & Phê duyệt điểm vào lệnh trước khi gửi Broker/MT5)
-              </label>
-              <span id="ai-gatekeeper-badge" style="background:#0f2d1e; border:1px solid #3fb950; color:#3fb950; padding:1px 6px; border-radius:4px; font-size:10px; font-weight: bold;">AI ACTIVE</span>
+            <!-- Quick action buttons -->
+            <div class="radar-actions">
+              <button class="btn btn-danger" onclick="panicCloseAll()">🚨 PANIC CLOSE ALL</button>
+              <button id="btn-pause" class="btn btn-warning" onclick="togglePause()">⏸ PAUSE</button>
+              <button class="btn btn-success" onclick="openOrderModal('BUY')">🟢 BUY</button>
+              <button class="btn btn-danger" onclick="openOrderModal('SELL')">🔴 SELL</button>
+              <button class="btn btn-primary" onclick="simulateTick()" style="margin-left:auto;">⚡ TEST TICK</button>
             </div>
-            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
-              <label for="cfg-ai-confidence-input" style="color: #8b949e;">Ngưỡng tin cậy (Min Confidence):</label>
-              <input id="cfg-ai-confidence-input" class="form-control" type="number" step="0.05" min="0.1" max="1.0" value="0.65" style="width: 75px; text-align: center; padding: 3px 6px;" />
-            </div>
-          </div>
-
-          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top: 8px;">
-            <button class="btn btn-warning" style="padding:4px 12px; font-size:11px;" onclick="resetRiskConfigToAuto()">🔄 Đặt lại về Gợi Ý Tự Động (Reset)</button>
-            <button class="btn btn-primary" style="padding:4px 14px; font-size:11px;" onclick="saveRiskConfig()">💾 Lưu Cấu Hình Khối Lượng & SL/TP</button>
           </div>
         </div>
 
-        <!-- Telemetry Log Stream -->
-        <div class="card">
-          <div class="card-title">
-            <span>Live Telemetry Stream (M1/M3/M30 FSM)</span>
-            <button class="btn btn-primary" style="padding:2px 8px; font-size:10px;" onclick="clearTelemetry()">Clear</button>
-          </div>
-          <div id="telemetry-log" class="terminal">
-            <div>[SYSTEM] Connected to EventBus telemetry on ws://127.0.0.1:29120/ws/telemetry</div>
-          </div>
-        </div>
-      </div>
-    </div>
+        <!-- ========== RIGHT COLUMN: Orders + AI Info ========== -->
+        <div class="right-col">
 
-    <!-- TAB 2: SERVER B (EVALUATION STUDIO, AI PLANNING & AUDIT) -->
+          <!-- Active Positions Table -->
+          <div class="card">
+            <div class="card-title">
+              <span>📋 VỊ THẾ ĐANG MỞ</span>
+              <span id="position-count" style="color:#3fb950; font-size:11px;">0 Open</span>
+            </div>
+            <div style="overflow-x:auto;">
+              <table id="positions-table">
+                <thead>
+                  <tr>
+                    <th>Setup</th>
+                    <th>Side</th>
+                    <th>State</th>
+                    <th>Lots</th>
+                    <th>Entry</th>
+                    <th>SL / TP</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="positions-tbody">
+                  <tr><td colspan="7" class="empty-row">Chưa có vị thế. Engine đang quét setup...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Closed Trades Journal -->
+          <div class="card">
+            <div class="card-title">
+              <span>📖 NHẬT KÝ LỆNH ĐÃ ĐÓNG</span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span id="history-count" style="font-size:11px; color:#8b949e;">0 Closed</span>
+                <button class="btn btn-primary" style="padding:2px 8px; font-size:11px;" onclick="fetchTradeHistory()">🔄 Refresh</button>
+                <button class="btn btn-danger" style="padding:2px 8px; font-size:11px;" onclick="clearTradeHistory()">🗑️ Xóa nhật ký</button>
+              </div>
+            </div>
+            <div style="overflow-x:auto; max-height:200px;">
+              <table id="history-table">
+                <thead>
+                  <tr>
+                    <th>Thời gian</th>
+                    <th>Setup</th>
+                    <th>Side</th>
+                    <th>Entry</th>
+                    <th>SL / TP1</th>
+                    <th>Kết quả</th>
+                  </tr>
+                </thead>
+                <tbody id="history-tbody">
+                  <tr><td colspan="6" class="empty-row">Chưa có lệnh hoàn tất trong phiên.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Telemetry Log -->
+          <div class="card">
+            <div class="card-title">
+              <span>📡 LIVE TELEMETRY</span>
+              <button class="btn btn-primary" style="padding:2px 8px; font-size:10px;" onclick="clearTelemetry()">Clear</button>
+            </div>
+            <div id="telemetry-log" class="terminal">
+              <div>[SYSTEM] Connected to EventBus telemetry on ws://127.0.0.1:29120/ws/telemetry</div>
+            </div>
+          </div>
+
+          <!-- AI Market Intelligence (Gold Macro) -->
+          <div class="card ai-intel-card">
+            <div class="card-title">
+              <span>🧠 NHẬN ĐỊNH THỊ TRƯỜNG (AI MACRO)</span>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span id="news-blackout-badge" class="badge-safe">🟢 AN TOÀN</span>
+                <button class="btn btn-primary" style="padding:2px 8px; font-size:10px;" onclick="triggerNewsAnalysis()">🔍 Quét tin</button>
+              </div>
+            </div>
+
+            <!-- AI Summary -->
+            <div class="ai-summary-row">
+              <div class="ai-box blue">
+                <div class="ai-box-label">NHẬN ĐỊNH VĨ MÔ</div>
+                <div id="news-recommendation-text" style="color:#f0f6fc; font-size:11px; line-height:1.5;">Đang tải...</div>
+              </div>
+              <div class="ai-box green">
+                <div class="ai-box-label">XU HƯỚNG MACRO</div>
+                <div id="news-macro-bias" style="font-size:16px; font-weight:bold; color:#58a6ff;">NEUTRAL</div>
+                <div style="margin-top:4px; color:#8b949e; font-size:10px;">
+                  Vol: <strong id="news-lot-multiplier" style="color:#e3b341;">1.0x</strong>
+                </div>
+              </div>
+              <div class="ai-box red">
+                <div class="ai-box-label">SỰ KIỆN TIẾP THEO</div>
+                <div id="news-next-event-title" style="font-weight:bold; color:#f85149; font-size:11px;">Đang kiểm tra...</div>
+                <div id="news-next-event-time" style="color:#8b949e; font-size:10px; margin-top:2px;">-</div>
+                <div id="news-countdown-text" style="color:#e3b341; font-size:11px; font-weight:bold; margin-top:2px;">-</div>
+              </div>
+            </div>
+
+            <!-- Economic Calendar (compact) -->
+            <div class="news-calendar-wrap">
+              <table style="width:100%; border-collapse:collapse; font-size:11px;">
+                <thead>
+                  <tr style="border-bottom:1px solid #30363d; color:#8b949e; background:#161b22;">
+                    <th style="padding:5px 8px;">Giờ (VN)</th>
+                    <th style="padding:5px 8px;">Mức</th>
+                    <th style="padding:5px 8px;">Sự kiện</th>
+                    <th style="padding:5px 8px;">Dự báo</th>
+                    <th style="padding:5px 8px;">Kỳ trước</th>
+                  </tr>
+                </thead>
+                <tbody id="news-calendar-tbody">
+                  <tr><td colspan="5" style="padding:8px; text-align:center; color:#8b949e;">Đang tải lịch kinh tế...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Risk Config (collapsed by default) -->
+          <div class="card risk-config-card">
+            <div class="card-title" style="cursor:pointer;" onclick="toggleRiskConfig()">
+              <span>⚙️ CẤU HÌNH KHỐI LƯỢNG &amp; SL/TP</span>
+              <span id="risk-mode-badge" class="badge-ok">AUTO</span>
+            </div>
+            <div id="risk-config-body" style="display:none;">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px; margin-top:6px;">
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                    <label style="color:#8b949e;">Lot (Volume):</label>
+                    <button type="button" class="badge-btn" onclick="applySuggestedLot()">Gợi ý</button>
+                  </div>
+                  <input id="cfg-volume-input" class="form-control" type="number" step="0.01" placeholder="Auto (1% risk)" />
+                </div>
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                    <label style="color:#8b949e;">% Rủi ro / lệnh:</label>
+                    <button type="button" class="badge-btn" onclick="document.getElementById('cfg-risk-pct-input').value='1.0'">1.0%</button>
+                  </div>
+                  <input id="cfg-risk-pct-input" class="form-control" type="number" step="0.1" placeholder="1.0%" />
+                </div>
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                    <label style="color:#8b949e;">SL cố định:</label>
+                    <button type="button" class="badge-btn" onclick="applySuggestedSL()">Gợi ý</button>
+                  </div>
+                  <input id="cfg-sl-input" class="form-control" type="number" step="0.01" placeholder="Auto (S1)" />
+                </div>
+                <div>
+                  <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                    <label style="color:#8b949e;">TP1 cố định:</label>
+                    <button type="button" class="badge-btn" onclick="applySuggestedTP()">Gợi ý</button>
+                  </div>
+                  <input id="cfg-tp-input" class="form-control" type="number" step="0.01" placeholder="Auto (T1)" />
+                </div>
+              </div>
+
+              <div style="margin-top:8px; padding:8px 10px; background:#0d1117; border:1px solid #30363d; border-radius:6px; display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <input type="checkbox" id="cfg-ai-pre-entry-input" checked style="cursor:pointer; width:15px; height:15px;" />
+                  <label for="cfg-ai-pre-entry-input" style="font-size:11px; font-weight:600; color:#f0f6fc; cursor:pointer;">
+                    🛡️ AI Pre-Entry Gatekeeper
+                  </label>
+                  <span id="ai-gatekeeper-badge" style="background:#0f2d1e; border:1px solid #3fb950; color:#3fb950; padding:1px 6px; border-radius:4px; font-size:10px;">AI ACTIVE</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                  <label for="cfg-ai-confidence-input" style="color:#8b949e;">Min Confidence:</label>
+                  <input id="cfg-ai-confidence-input" class="form-control" type="number" step="0.05" min="0.1" max="1.0" value="0.65" style="width:65px; text-align:center; padding:3px 6px;" />
+                </div>
+              </div>
+
+              <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+                <button class="btn btn-warning" style="padding:4px 10px; font-size:11px;" onclick="resetRiskConfigToAuto()">🔄 Reset Auto</button>
+                <button class="btn btn-primary" style="padding:4px 12px; font-size:11px;" onclick="saveRiskConfig()">💾 Lưu Cấu Hình</button>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- end right-col -->
+      </div><!-- end main-grid -->
+    </div><!-- end tab-server-a -->
+
+    <!-- ===== TAB 2: SERVER B (AI Brain & Audit) ===== -->
     <div id="tab-server-b" class="tab-pane">
-      <!-- AI Engine & API Key Configuration -->
-      <div class="card" style="padding: 12px 16px; background: #161b22; border: 1px solid #30363d; margin-bottom: 6px;">
-        <div class="card-title" style="margin-bottom: 8px;">
-          <span>⚙️ CẤU HÌNH AI API KEYS (GOOGLE GEMINI / OPENAI)</span>
-          <span id="ai-key-status" style="font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #21262d; color: #58a6ff;">Checking...</span>
+
+      <!-- AI API Config -->
+      <div class="card" style="padding:12px 16px; background:#161b22;">
+        <div class="card-title" style="margin-bottom:8px;">
+          <span>⚙️ CẤU HÌNH AI API KEYS (GEMINI / OPENAI)</span>
+          <span id="ai-key-status" style="font-size:11px; padding:2px 8px; border-radius:4px; background:#21262d; color:#58a6ff;">Checking...</span>
         </div>
-        <div style="display: grid; grid-template-columns: 1.2fr 2fr 1.5fr auto; gap: 10px; align-items: center; font-size: 12px;">
+        <div style="display:grid; grid-template-columns:1.2fr 2fr 1.5fr auto; gap:10px; align-items:center; font-size:12px;">
           <div>
-            <label style="color:#8b949e; display:block; margin-bottom:4px;">Nhà cung cấp (Provider):</label>
+            <label style="color:#8b949e; display:block; margin-bottom:4px;">Provider:</label>
             <select id="ai-provider-select" onchange="onProviderChange()" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#f0f6fc; padding:6px; border-radius:4px;">
-              <option value="gemini">Google Gemini (Nhanh & Miễn phí)</option>
+              <option value="gemini">Google Gemini (Nhanh &amp; Miễn phí)</option>
               <option value="openai">OpenAI (GPT-4o)</option>
             </select>
           </div>
@@ -298,208 +356,149 @@
           </div>
           <div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-              <label style="color:#8b949e; margin-bottom:0;">Mô hình (Model):</label>
-              <button id="btn-fetch-models" type="button" onclick="fetchOnlineModels()" style="background:#21262d; border:1px solid #388bfd; color:#58a6ff; font-size:10px; padding:2px 7px; border-radius:3px; cursor:pointer;" title="Tìm và quét các model mới nhất từ Internet">🔄 Cập nhật từ Internet</button>
+              <label style="color:#8b949e; margin-bottom:0;">Model:</label>
+              <button id="btn-fetch-models" type="button" onclick="fetchOnlineModels()" style="background:#21262d; border:1px solid #388bfd; color:#58a6ff; font-size:10px; padding:2px 7px; border-radius:3px; cursor:pointer;">🔄 Cập nhật</button>
             </div>
             <select id="ai-model-select" onchange="onModelChange()" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#f0f6fc; padding:6px; border-radius:4px;">
-              <option value="gemini-2.0-flash">gemini-2.0-flash (Siêu tốc <1.5s - Khuyên dùng)</option>
-              <option value="gemini-2.5-pro">gemini-2.5-pro (Thế hệ 2.5 - Suy luận chuyên sâu)</option>
-              <option value="gemini-2.5-flash">gemini-2.5-flash (Thế hệ 2.5 - Nhanh & Thông minh)</option>
-              <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (Siêu nhẹ, tiết kiệm)</option>
-              <option value="gemini-2.0-flash-thinking-exp-01-21">gemini-2.0-flash-thinking (Tư duy chuỗi)</option>
-              <option value="gemini-2.0-pro-exp-02-05">gemini-2.0-pro-exp (Bản Pro thử nghiệm)</option>
+              <option value="gemini-2.0-flash">gemini-2.0-flash (Siêu tốc &lt;1.5s - Khuyên dùng)</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro (Suy luận chuyên sâu)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (Nhanh &amp; Thông minh)</option>
+              <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (Siêu nhẹ)</option>
               <option value="gemini-1.5-pro">gemini-1.5-pro (Ổn định, Context 2M)</option>
-              <option value="gemini-1.5-flash">gemini-1.5-flash (Ổn định, chuẩn)</option>
-              <option value="gemini-1.5-flash-8b">gemini-1.5-flash-8b (Bản nhỏ)</option>
-              <option value="custom">✏️ Nhập model tùy chỉnh khác...</option>
+              <option value="custom">✏️ Model tùy chỉnh...</option>
             </select>
-            <input id="ai-custom-model-input" type="text" placeholder="Nhập mã model (vd: gemini-2.5-pro)..." style="display:none; width:100%; margin-top:4px; background:#0d1117; border:1px solid #58a6ff; color:#58a6ff; padding:5px 8px; border-radius:4px; font-size:11px;" />
+            <input id="ai-custom-model-input" type="text" placeholder="Nhập mã model..." style="display:none; width:100%; margin-top:4px; background:#0d1117; border:1px solid #58a6ff; color:#58a6ff; padding:5px 8px; border-radius:4px; font-size:11px;" />
           </div>
           <div style="display:flex; align-self:flex-end;">
-            <button class="btn btn-primary" onclick="saveAIConfig()" style="height:32px;">💾 Lưu & Kích Hoạt Key</button>
+            <button class="btn btn-primary" onclick="saveAIConfig()" style="height:32px;">💾 Lưu &amp; Kích Hoạt</button>
           </div>
         </div>
       </div>
 
-      <!-- GOLD MACRO NEWS & BLACKOUT RADAR -->
-      <div class="card" style="padding: 14px 18px; background: #161b22; border: 1px solid #30363d; margin-bottom: 8px;">
-        <div class="card-title" style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 14px;">📰 LỊCH TIN KINH TẾ & NHẬN ĐỊNH VĨ MÔ VÀNG (XAUUSD MACRO RADAR)</span>
-            <span id="news-blackout-badge" style="font-size: 11px; padding: 2px 10px; border-radius: 4px; background: #238636; color: #fff; font-weight: bold;">🟢 AN TOÀN GIAO DỊCH</span>
-          </div>
-          <div style="display: flex; gap: 8px;">
-            <button class="btn btn-primary" style="padding: 4px 12px; font-size: 11px;" onclick="triggerNewsAnalysis()">🔍 Quét & Phân Tích Tin Mới</button>
-          </div>
-        </div>
-
-        <div style="display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 12px; font-size: 12px; margin-bottom: 10px;">
-          <!-- Box 1: Khuyến nghị AI -->
-          <div style="background: #0d1117; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #58a6ff;">
-            <div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">NHẬN ĐỊNH VĨ MÔ & KHUYẾN NGHỊ:</div>
-            <div id="news-recommendation-text" style="color: #f0f6fc; line-height: 1.4;">Đang tải dữ liệu nhận định vĩ mô...</div>
-          </div>
-          <!-- Box 2: Xu hướng & Khối lượng -->
-          <div style="background: #0d1117; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #2ea043;">
-            <div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">XU HƯỚNG VĨ MÔ KHUYẾN NGHỊ:</div>
-            <div id="news-macro-bias" style="font-size: 13px; font-weight: bold; color: #58a6ff;">NEUTRAL</div>
-            <div style="margin-top: 6px; color: #8b949e; font-size: 11px;">Hệ số điều chỉnh Volume: <strong id="news-lot-multiplier" style="color: #e3b341;">1.0x (100%)</strong></div>
-          </div>
-          <!-- Box 3: Sự kiện tiếp theo & Đếm ngược -->
-          <div style="background: #0d1117; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #da3633;">
-            <div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">SỰ KIỆN KINH TẾ TIẾP THEO:</div>
-            <div id="news-next-event-title" style="font-weight: bold; color: #f85149;">Đang kiểm tra...</div>
-            <div id="news-next-event-time" style="color: #8b949e; font-size: 11px; margin-top: 2px;">-</div>
-            <div id="news-countdown-text" style="color: #e3b341; font-weight: bold; font-size: 11px; margin-top: 2px;">-</div>
-          </div>
-        </div>
-
-        <!-- Bảng danh sách sự kiện sắp tới -->
-        <div style="max-height: 140px; overflow-y: auto; background: #0d1117; border-radius: 4px; border: 1px solid #21262d;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
-            <thead>
-              <tr style="border-bottom: 1px solid #30363d; color: #8b949e; background: #161b22;">
-                <th style="padding: 6px 10px;">Thời Gian</th>
-                <th style="padding: 6px 10px;">Quốc Gia</th>
-                <th style="padding: 6px 10px;">Mức Độ</th>
-                <th style="padding: 6px 10px;">Sự Kiện</th>
-                <th style="padding: 6px 10px;">Dự Báo</th>
-                <th style="padding: 6px 10px;">Kỳ Trước</th>
-              </tr>
-            </thead>
-            <tbody id="news-calendar-tbody">
-              <tr><td colspan="6" style="padding: 10px; text-align: center; color: #8b949e;">Đang tải lịch kinh tế từ ForexFactory...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
+      <!-- Studio Grid: Planner + Audit -->
       <div class="studio-grid">
         <!-- Pre-Session Planning -->
         <div class="card">
-
           <div class="card-title">
             <span>Pre-Session AI Strategy Planner</span>
-            <button class="btn btn-success" onclick="generateAIPlan()">⚡ Generate New AI Plan</button>
+            <button class="btn btn-success" onclick="generateAIPlan()">⚡ Generate Plan</button>
           </div>
-          <p style="font-size:12px; color:#8b949e;">
-            Aggregates HTF/TTF rates, RAG past lessons, macroeconomic events, and generates schema-compliant <code>trading_config.json</code>.
-          </p>
-          <textarea id="ai-plan-json" class="json-view" placeholder="Click 'Generate New AI Plan' to invoke AI reasoning..."></textarea>
+          <p style="font-size:12px; color:#8b949e;">Tổng hợp HTF/TTF, bài học RAG, sự kiện kinh tế → sinh <code>trading_config.json</code> chuẩn schema.</p>
+          <textarea id="ai-plan-json" class="json-view" placeholder="Click 'Generate Plan' để AI lên kế hoạch..."></textarea>
           <div style="display:flex; justify-content:flex-end; gap:10px;">
-            <button class="btn btn-primary" onclick="deployPlanToServerA()">🚀 Approve & Deploy to Server A</button>
+            <button class="btn btn-primary" onclick="deployPlanToServerA()">🚀 Approve &amp; Deploy to Server A</button>
           </div>
         </div>
 
-        <!-- Post-Session Hindsight Audit -->
+        <!-- Post-Session Audit -->
         <div class="card" style="display:flex; flex-direction:column;">
           <div class="card-title">
-            <span>Post-Session Hindsight Audit (Lance Beggs YTC + AI Review)</span>
+            <span>Post-Session Hindsight Audit (AI Review)</span>
             <div style="display:flex; gap:8px;">
-              <button class="btn btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="loadLatestAudit()">📜 Xem Báo Cáo Gần Nhất</button>
-              <button class="btn btn-primary" style="padding:4px 12px; font-size:11px;" onclick="runHindsightAudit()">🔍 Đánh Giá Bằng AI (Run Audit)</button>
+              <button class="btn btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="loadLatestAudit()">📜 Báo cáo gần nhất</button>
+              <button class="btn btn-danger" style="padding:4px 10px; font-size:11px;" onclick="clearLessonsAndRules()">🗑️ Xóa bài học</button>
+              <button class="btn btn-primary" style="padding:4px 12px; font-size:11px;" onclick="runHindsightAudit()">🔍 Run Audit</button>
             </div>
           </div>
-          <p style="font-size:12px; color:#8b949e; margin-bottom:8px;">
-            Hệ thống sẽ tập hợp toàn bộ <strong>Nhật ký giao dịch (kèm hoàn cảnh vào lệnh)</strong> của phiên và gửi đến AI để đánh giá lại <strong>cách tính Trading Plan</strong> (S/R zones, Market Regime, Matrix Setups, Wholesale Engine & tham số).
-          </p>
+          <p style="font-size:12px; color:#8b949e; margin-bottom:8px;">AI đánh giá lại toàn bộ nhật ký lệnh kèm bối cảnh, phân tích S/R zones, setup matrix, Wholesale Engine.</p>
           <div id="audit-output" style="background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:14px; font-size:12px; flex:1; overflow-y:auto; min-height:260px; max-height:600px;">
-            <div style="color:#8b949e; text-align:center; padding:20px 0;">Chưa thực hiện kiểm toán (Audit) cho phiên này. Hãy thực hiện giao dịch hoặc bấm "🔍 Đánh Giá Bằng AI" để phân tích.</div>
+            <div style="color:#8b949e; text-align:center; padding:20px 0;">Chưa thực hiện Audit. Hãy giao dịch hoặc bấm "🔍 Run Audit".</div>
           </div>
         </div>
       </div>
     </div>
   </main>
 
-  <!-- MODAL 1: ĐẶT LỆNH THỦ CÔNG (MANUAL ORDER MODAL) -->
+  <!-- MODAL: Đặt lệnh thủ công -->
   <div id="modal-order" class="modal-overlay" style="display:none;">
     <div class="modal-box">
       <div class="modal-title">
-        <span id="modal-order-header">📈 MỞ LỆNH THỦ CÔNG (BUY/SELL)</span>
+        <span id="modal-order-header">📈 MỞ LỆNH THỦ CÔNG</span>
         <button type="button" onclick="closeOrderModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:16px;">✕</button>
       </div>
-
       <div class="form-group">
-        <label>Loại lệnh (Order Type):</label>
+        <label>Loại lệnh:</label>
         <select id="modal-order-type" class="form-control" onchange="onOrderTypeChange()">
-          <option value="MARKET">MARKET (Khớp ngay theo giá thị trường)</option>
+          <option value="MARKET">MARKET (Khớp ngay)</option>
           <option value="LIMIT">LIMIT (Chờ mua thấp / bán cao)</option>
-          <option value="STOP">STOP (Chờ phá vỡ theo đà)</option>
+          <option value="STOP">STOP (Chờ phá vỡ)</option>
         </select>
       </div>
-
       <div class="form-group" id="grp-order-price" style="display:none;">
         <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-          <label>Giá đặt lệnh (Entry Price):</label>
+          <label>Giá đặt (Entry Price):</label>
           <button type="button" class="badge-btn" onclick="fillSuggestedOrderPrice()">Lấy giá gợi ý</button>
         </div>
         <input id="modal-order-price" class="form-control" type="number" step="0.01" placeholder="Nhập giá chờ..." />
       </div>
-
       <div class="form-group">
         <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-          <label>Khối lượng (Volume / Lot):</label>
-          <button type="button" class="badge-btn" onclick="fillSuggestedOrderLot()">Lấy Lot gợi ý</button>
+          <label>Khối lượng (Lot):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderLot()">Lot gợi ý</button>
         </div>
         <input id="modal-order-volume" class="form-control" type="number" step="0.01" value="0.01" />
       </div>
-
       <div class="form-group">
         <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-          <label>Dừng lỗ (Stop Loss - SL):</label>
-          <button type="button" class="badge-btn" onclick="fillSuggestedOrderSL()">Lấy SL gợi ý</button>
+          <label>Dừng lỗ (SL):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderSL()">SL gợi ý</button>
         </div>
-        <input id="modal-order-sl" class="form-control" type="number" step="0.01" placeholder="Tùy chọn hoặc theo gợi ý..." />
+        <input id="modal-order-sl" class="form-control" type="number" step="0.01" placeholder="Tùy chọn..." />
       </div>
-
       <div class="form-group">
         <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-          <label>Chốt lời (Take Profit - TP):</label>
-          <button type="button" class="badge-btn" onclick="fillSuggestedOrderTP()">Lấy TP gợi ý</button>
+          <label>Chốt lời (TP):</label>
+          <button type="button" class="badge-btn" onclick="fillSuggestedOrderTP()">TP gợi ý</button>
         </div>
-        <input id="modal-order-tp" class="form-control" type="number" step="0.01" placeholder="Tùy chọn hoặc theo gợi ý..." />
+        <input id="modal-order-tp" class="form-control" type="number" step="0.01" placeholder="Tùy chọn..." />
       </div>
-
       <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
-        <button type="button" class="btn btn-warning" onclick="closeOrderModal()">Hủy bỏ</button>
+        <button type="button" class="btn btn-warning" onclick="closeOrderModal()">Hủy</button>
         <button id="modal-order-submit" type="button" class="btn btn-success" onclick="submitManualOrder()">🚀 Xác Nhận Đặt Lệnh</button>
       </div>
     </div>
   </div>
 
-  <!-- MODAL 2: ĐIỀU CHỈNH SL / TP VỊ THẾ ĐANG CHẠY (MODIFY POSITION MODAL) -->
+  <!-- MODAL: Điều chỉnh SL/TP -->
   <div id="modal-modify" class="modal-overlay" style="display:none;">
     <div class="modal-box">
       <div class="modal-title">
-        <span>✏️ ĐIỀU CHỈNH SL / TP CHO TICKET #<span id="mod-ticket-label">--</span></span>
+        <span>✏️ ĐIỀU CHỈNH SL/TP — Ticket #<span id="mod-ticket-label">--</span></span>
         <button type="button" onclick="closeModifyModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:16px;">✕</button>
       </div>
-
       <input type="hidden" id="mod-ticket-input" />
-
       <div class="form-group">
         <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-          <label>Mức dừng lỗ mới (New SL):</label>
-          <button type="button" class="badge-btn" onclick="fillModBreakeven()">Dời về Hòa vốn (BE)</button>
+          <label>SL mới:</label>
+          <button type="button" class="badge-btn" onclick="fillModBreakeven()">Dời Hòa Vốn (BE)</button>
         </div>
         <input id="mod-sl-input" class="form-control" type="number" step="0.01" />
       </div>
-
       <div class="form-group">
         <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-          <label>Mức chốt lời mới (New TP):</label>
+          <label>TP mới:</label>
           <button type="button" class="badge-btn" onclick="fillModSuggestedTP()">TP Gợi ý</button>
         </div>
         <input id="mod-tp-input" class="form-control" type="number" step="0.01" />
       </div>
-
       <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
-        <button type="button" class="btn btn-warning" onclick="closeModifyModal()">Hủy bỏ</button>
-        <button type="button" class="btn btn-primary" onclick="submitModifyPosition()">💾 Cập Nhật SL/TP MT5</button>
+        <button type="button" class="btn btn-warning" onclick="closeModifyModal()">Hủy</button>
+        <button type="button" class="btn btn-primary" onclick="submitModifyPosition()">💾 Cập Nhật MT5</button>
       </div>
     </div>
   </div>
 
   <script src="app.js"></script>
+
+  <!-- Toggle Risk Config helper -->
+  <script>
+    function toggleRiskConfig() {
+      const body = document.getElementById('risk-config-body');
+      body.style.display = body.style.display === 'none' ? 'block' : 'none';
+    }
+
+    // Add radar-lots update support (called from app.js updateRadar)
+    const _origUpdateRadar = typeof updateRadar !== 'undefined' ? updateRadar : null;
+  </script>
 </body>
 </html>

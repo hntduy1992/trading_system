@@ -231,7 +231,7 @@ class TestYTCSystem(unittest.TestCase):
 
         paper = PaperBroker()
         bus = AsyncEventBus()
-        entry_uc = EvaluateEntryUseCase(paper, bus)
+        entry_uc = EvaluateEntryUseCase(paper, bus, compiled_lesson_rules=[])
 
         config = SessionConfig(
             session_id="test_sess",
@@ -289,7 +289,7 @@ class TestYTCSystem(unittest.TestCase):
 
         paper = PaperBroker()
         bus = AsyncEventBus()
-        entry_uc = EvaluateEntryUseCase(paper, bus)
+        entry_uc = EvaluateEntryUseCase(paper, bus, compiled_lesson_rules=[])
 
         config = SessionConfig(
             session_id="test_cb",
@@ -494,7 +494,7 @@ class TestYTCSystem(unittest.TestCase):
 
         broker = MagicMock(spec=IBrokerGateway)
         bus = MagicMock(spec=IEventBus)
-        use_case = EvaluateEntryUseCase(broker, bus)
+        use_case = EvaluateEntryUseCase(broker, bus, compiled_lesson_rules=[])
 
         # Simulate 2 consecutive scratch trades at the same zone 2640.0
         trade1 = TradeLifecycle(

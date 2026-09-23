@@ -22,10 +22,17 @@ from core.domain.rules.pre_entry_scorer import PreEntryScorer, DeterministicEval
 from core.domain.rules.lessons_compiler import LessonRule, LessonsCompiler
 from core.domain.interfaces.broker import IBrokerGateway
 from core.domain.interfaces.event_bus import IEventBus
+from config import CONFIG
 
 
 class EvaluateEntryUseCase:
-    def __init__(self, broker: IBrokerGateway, event_bus: IEventBus, ai_engine: Optional[Any] = None):
+    def __init__(
+        self,
+        broker: IBrokerGateway,
+        event_bus: IEventBus,
+        ai_engine: Optional[Any] = None,
+        compiled_lesson_rules: Optional[List[LessonRule]] = None
+    ):
         self.broker = broker
         self.event_bus = event_bus
         self.ai_engine = ai_engine
@@ -49,11 +56,17 @@ class EvaluateEntryUseCase:
         self.last_stopped_out_time: float = 0.0
         self.last_closed_state: Optional[PositionState] = None
         self.zone_scratch_history: Dict[str, List[float]] = {}
+        self.last_trade_was_profitable: bool = False
+        self.last_closed_pnl: float = 0.0
         self.consecutive_losses: int = 0
         self.total_session_trades: int = 0
+        self.candidate_setup: Optional[Dict[str, Any]] = None
         # Layer 2: Compiled lesson rules — loaded once at startup, updated after each audit
-        self.compiled_lesson_rules: List[LessonRule] = []
-        self._load_persisted_lesson_rules()
+        if compiled_lesson_rules is not None:
+            self.compiled_lesson_rules = compiled_lesson_rules
+        else:
+            self.compiled_lesson_rules = []
+            self._load_persisted_lesson_rules()
 
     def _load_persisted_lesson_rules(self) -> None:
         """Nạp lesson rules đã lưu từ JSON store vào memory — chạy 1 lần khi khởi động."""
@@ -79,8 +92,15 @@ class EvaluateEntryUseCase:
         """Records closed trade outcome to adjust circuit breaker, dynamic cooldown, and zone scratch tracking."""
         self.last_trade_closed_time = trade.close_time or time.time()
         self.last_closed_state = trade.state
+        self.last_closed_pnl = getattr(trade, "total_pnl", 0.0)
+
+        # Check if trade closed with positive profit (either FULLY_CLOSED, profit-scratch, or partial lock)
+        close_ctx_pnl = getattr(trade, "close_context", {}).get("total_pnl", 0.0) if getattr(trade, "close_context", None) else 0.0
+        is_profitable = (self.last_closed_pnl > 0.0) or (close_ctx_pnl > 0.0)
+        self.last_trade_was_profitable = is_profitable
+
         if is_loss is None:
-            is_loss = (trade.state == PositionState.STOPPED_OUT)
+            is_loss = (trade.state == PositionState.STOPPED_OUT) and not is_profitable
         
         if is_loss:
             self.consecutive_losses += 1
@@ -89,11 +109,16 @@ class EvaluateEntryUseCase:
                 self.stopped_out_anchors.add(trade.anchor_id)
             if getattr(trade, "spatial_anchor_key", None):
                 self.stopped_out_spatial_keys.add(trade.spatial_anchor_key)
-        elif trade.state == PositionState.FULLY_CLOSED:
+        elif is_profitable or trade.state == PositionState.FULLY_CLOSED:
+            # Winning trades reset consecutive losses immediately
             self.consecutive_losses = 0
+            # If trade closed early but achieved profit, release anchor to allow continuation entries if setup re-triggers
+            if is_profitable and trade.anchor_id:
+                self.consumed_anchors.discard(trade.anchor_id)
 
-        # Track scratches per spatial price zone to prevent consolidation churn
-        if trade.state == PositionState.SCRATCHED and getattr(trade, "spatial_anchor_key", None):
+        # Track scratches per spatial price zone ONLY for real zero/flat scratches (consolidation chop).
+        # Profitable scratches (e.g. Profit Secured scratch) achieved profit and must NOT lockout the zone!
+        if trade.state == PositionState.SCRATCHED and not is_profitable and getattr(trade, "spatial_anchor_key", None):
             now = self.last_trade_closed_time
             if trade.spatial_anchor_key not in self.zone_scratch_history:
                 self.zone_scratch_history[trade.spatial_anchor_key] = []
@@ -108,18 +133,27 @@ class EvaluateEntryUseCase:
         self.last_trade_closed_time = 0.0
         self.last_stopped_out_time = 0.0
         self.last_closed_state = None
+        self.last_closed_pnl = 0.0
+        self.last_trade_was_profitable = False
         self.consecutive_losses = 0
         self.total_session_trades = 0
+        self.candidate_setup = None
 
 
     async def execute(
         self,
         config: SessionConfig,
-        bars_m30: List[Bar],
-        bars_m3: List[Bar],
-        bars_m1: List[Bar],
-        active_trades: List[TradeLifecycle]
+        bars_m30: Optional[List[Bar]] = None,
+        bars_m3: Optional[List[Bar]] = None,
+        bars_m1: Optional[List[Bar]] = None,
+        active_trades: Optional[List[TradeLifecycle]] = None,
+        bars_m15: Optional[List[Bar]] = None,
+        bars_htf: Optional[List[Bar]] = None
     ) -> Optional[TradeLifecycle]:
+        bars_htf = bars_htf or bars_m15 or bars_m30 or []
+        bars_m3 = bars_m3 or []
+        bars_m1 = bars_m1 or []
+        active_trades = active_trades or []
         """
         Scans for valid setups matching current session config and triggers wholesale entry.
         Optimized for Live MT5 execution with strict capital protection constraints:
@@ -159,7 +193,12 @@ class EvaluateEntryUseCase:
 
         # 3. Capital Protection Constraint: Post-Trade Cooldown (Differentiated by outcome)
         base_cooldown = exec_rules.get("post_trade_cooldown_seconds", 180)
-        if self.last_closed_state == PositionState.SCRATCHED:
+        profit_cooldown = exec_rules.get("profitable_close_cooldown_seconds", 0)
+
+        if getattr(self, "last_trade_was_profitable", False) or (getattr(self, "last_closed_pnl", 0.0) > 0.0):
+            # Trades closed early or fully with profit are allowed to continue trading immediately
+            cooldown_secs = profit_cooldown
+        elif self.last_closed_state == PositionState.SCRATCHED:
             cooldown_secs = exec_rules.get("scratch_cooldown_seconds", max(base_cooldown, 300))
         elif self.last_closed_state == PositionState.STOPPED_OUT:
             cooldown_secs = exec_rules.get("stopout_cooldown_seconds", max(base_cooldown, 420))
@@ -170,16 +209,31 @@ class EvaluateEntryUseCase:
         if self.last_trade_closed_time > 0 and (now - self.last_trade_closed_time) < cooldown_secs:
             return None
 
-        # 3a. News Blackout Window Filter (Freeze new entries around high-impact economic news)
+        # 3a. News Blackout Window Filter (Freeze new entries around high/medium impact economic news)
         news_filter = config.news_filter or {}
         blackout_windows = news_filter.get("blackout_windows", [])
+        if not blackout_windows:
+            if not hasattr(self, "news_analyzer"):
+                from core.use_cases.intelligence.news_sentiment_analyzer import NewsSentimentAnalyzerUseCase
+                self.news_analyzer = NewsSentimentAnalyzerUseCase(ai_engine=self.ai_engine)
+            blackout_st = self.news_analyzer.check_blackout_status(now)
+            if blackout_st.get("is_in_blackout"):
+                await self.event_bus.publish("telemetry", {
+                    "type": "ENTRY_REJECTED",
+                    "reason": f"News Blackout Active: Tạm ngừng giao dịch trước/sau tin {blackout_st.get('reason')}"
+                })
+                return None
+            blackout_windows = blackout_st.get("blackout_windows", [])
+
         for bw in blackout_windows:
             if bw.get("start_ts", 0) <= now <= bw.get("end_ts", 0):
                 event_title = bw.get("title", "High-Impact Economic Release")
+                impact_label = bw.get("impact", "HIGH")
                 await self.event_bus.publish("telemetry", {
                     "type": "ENTRY_REJECTED",
-                    "reason": f"News Blackout Active: Tạm ngừng giao dịch trước/sau tin đỏ '{event_title}' ({bw.get('start_str')} -> {bw.get('end_str')})"
+                    "reason": f"News Blackout Active: Tạm ngừng giao dịch trước/sau tin {impact_label} '{event_title}' ({bw.get('start_str')} -> {bw.get('end_str')})"
                 })
+                print(f"[ENGINE NEWS BLACKOUT] Entry REJECTED due to {impact_label} news: {event_title} ({bw.get('start_str')} -> {bw.get('end_str')})")
                 return None
 
         # 4. Capital Protection Constraint: Max Consecutive Losses Circuit Breaker
@@ -226,6 +280,64 @@ class EvaluateEntryUseCase:
             recent_m1 = bars_m1[-3:] if len(bars_m1) >= 3 else bars_m1
             stall_low = min(b.low for b in recent_m1)
             stall_high = max(b.high for b in recent_m1)
+
+        # 6b. Check existing candidate setup awaiting entry touch
+        if self.candidate_setup is not None:
+            cand = self.candidate_setup
+            if cand["anchor_id"] in self.consumed_anchors or cand["spatial_anchor_key"] in self.stopped_out_spatial_keys:
+                self.candidate_setup = None
+            else:
+                curr_bar = bars_m1[-1]
+                if cand.get("last_bar_timestamp") != curr_bar.timestamp:
+                    cand["last_bar_timestamp"] = curr_bar.timestamp
+                    cand["bars_waiting"] = cand.get("bars_waiting", 0) + 1
+
+                max_pending = cand.get("max_bars_pending", 4)
+                if max_pending and cand["bars_waiting"] >= max_pending:
+                    print(f"[ENGINE] Candidate setup {cand['setup_name']} expired after {cand['bars_waiting']} bars. Dropping candidate.")
+                    await self.event_bus.publish("telemetry", {
+                        "type": "CANDIDATE_EXPIRED",
+                        "setup": cand["setup_name"],
+                        "reason": f"Hết hạn chờ ({cand['bars_waiting']} nến M1 mà giá không chạm entry)."
+                    })
+                    self.candidate_setup = None
+                else:
+                    # Check SL violation
+                    sl_violated = (cand["side"] == OrderSide.BUY and current_price <= cand["sl"]) or \
+                                  (cand["side"] == OrderSide.SELL and current_price >= cand["sl"])
+                    if sl_violated:
+                        print(f"[ENGINE] Candidate setup {cand['setup_name']} SL violated before touch. Dropping candidate.")
+                    else:
+                        atr_1m = MicroPatternDetector.calculate_atr(bars_m1, period=14)
+                        touch_tolerance = max(profile.min_buffer_points, min(atr_1m * 0.35, profile.min_buffer_points * 1.5))
+                        is_touched = (current_price <= cand["entry_price"] + touch_tolerance) if cand["side"] == OrderSide.BUY else (current_price >= cand["entry_price"] - touch_tolerance)
+                        if is_touched:
+                            return await self._execute_market_trade(
+                                config=config,
+                                setup_name=cand["setup_name"],
+                                side=cand["side"],
+                                current_price=current_price,
+                                actual_sl=cand["sl"],
+                                actual_tp1=cand["tp1"],
+                                actual_tp2=cand["tp2"],
+                                lot_total=cand["lot_total"],
+                                lot_p1=cand["lot_p1"],
+                                lot_p2=cand["lot_p2"],
+                                wholesale=cand["wholesale"],
+                                anchor_id=cand["anchor_id"],
+                                spatial_anchor_key=cand["spatial_anchor_key"],
+                                stall_low=cand["stall_low"],
+                                stall_high=cand["stall_high"],
+                                trend=cand["trend"],
+                                bars_m1=bars_m1,
+                                bars_m3=bars_m3,
+                                risk_limit=cand["risk_limit"],
+                                profile=profile,
+                                macro_bias=cand.get("macro_bias", "NEUTRAL")
+                            )
+                        else:
+                            # Still approaching entry, keep waiting
+                            return None
 
         # 7. Check enabled setups according to session config
         for setup_name, enabled in config.setups_enabled.items():
@@ -278,6 +390,15 @@ class EvaluateEntryUseCase:
                     })
                     continue
 
+                # 7c. Anti-Congestion Filter (Choppy sideways noise filter)
+                if setup_name in ["PB", "CPB", "BPB", "YUM_YUM"] and CandlestickEngine.is_congestion(bars_m1, lookback=5):
+                    await self.event_bus.publish("telemetry", {
+                        "type": "SETUP_REJECTED",
+                        "setup": setup_name,
+                        "reason": f"Anti-Congestion Filter: Thị trường M1 đang giằng co nhiều râu nến (Congestion). Lọc bỏ setup tiếp diễn {setup_name} không chắc chắn."
+                    })
+                    continue
+
                 # Spatial Anchor Deduplication & Max Retries per Zone Check
                 spatial_anchor_key = f"{setup_name}_{side.value}_{round(pullback_price, 1)}"
                 max_retries = exec_rules.get("max_retries_per_zone", 2)
@@ -311,6 +432,28 @@ class EvaluateEntryUseCase:
                 atr_1m = MicroPatternDetector.calculate_atr(bars_m1, period=14)
                 min_sl_dist = max(profile.min_sl_points, atr_1m * 1.8)
 
+                sl_mult = float(risk_mgmt.get("sl_multiplier", getattr(CONFIG.risk, "SL_MULTIPLIER", 1.20)))
+                tp_mult = float(risk_mgmt.get("tp_multiplier", getattr(CONFIG.risk, "TP_MULTIPLIER", 0.90)))
+                min_rr = float(risk_mgmt.get("min_rr_ratio", getattr(CONFIG.risk, "MIN_RR_RATIO_PART1", 0.75)))
+                min_profit_dist = getattr(profile, "min_profit_points", 2.0)
+
+                # Tính biên độ nến gần nhất để SL neo ngoài vùng dao động tự nhiên của nến tín hiệu
+                candle_buf_ratio = float(risk_mgmt.get("candle_buffer_ratio",
+                    getattr(profile, "candle_buffer_ratio",
+                    getattr(CONFIG.risk, "CANDLE_BUFFER_RATIO", 0.25))))
+                candle_sl_mult = float(risk_mgmt.get("candle_sl_multiplier",
+                    getattr(profile, "candle_sl_multiplier",
+                    getattr(CONFIG.risk, "CANDLE_SL_MULTIPLIER", 1.20))))
+
+                recent_bars_for_sl = bars_m1[-2:] if len(bars_m1) >= 2 else bars_m1
+                recent_candle_range = max((b.high - b.low) for b in recent_bars_for_sl) if recent_bars_for_sl else 0.0
+                recent_candle_low = min(b.low for b in recent_bars_for_sl) if recent_bars_for_sl else None
+                recent_candle_high = max(b.high for b in recent_bars_for_sl) if recent_bars_for_sl else None
+
+                # Cập nhật sàn SL kết hợp cả ATR và biên độ nến thực tế
+                candle_sl_floor = recent_candle_range * candle_sl_mult
+                min_sl_dist = max(min_sl_dist, candle_sl_floor)
+
                 wholesale = WholesaleEngine.calculate_wholesale_levels(
                     setup_type=SetupType(setup_name),
                     side=side,
@@ -320,14 +463,23 @@ class EvaluateEntryUseCase:
                     micro_stall_high=stall_high,
                     micro_stall_low=stall_low,
                     buffer_pts=profile.min_buffer_points,
-                    min_sl_distance=min_sl_dist
+                    min_sl_distance=min_sl_dist,
+                    min_rr_ratio=min_rr,
+                    sl_multiplier=sl_mult,
+                    tp_multiplier=tp_mult,
+                    adaptive_entry=(setup_name in ["INSIDE_BAR_SMA21", "TREND_BAR_FAIL", "NR7_EMA20", "YUM_YUM"] or exec_rules.get("enable_adaptive_wholesale_entry", False)),
+                    min_profit_distance=min_profit_dist,
+                    recent_candle_range=recent_candle_range,
+                    recent_candle_low=recent_candle_low,
+                    recent_candle_high=recent_candle_high,
+                    candle_buffer_ratio=candle_buf_ratio
                 )
 
                 if not wholesale.is_valid_entry:
                     await self.event_bus.publish("telemetry", {
                         "type": "SETUP_REJECTED",
                         "setup": setup_name,
-                        "reason": f"Entry price {wholesale.recommended_entry} fails Wholesale / R:R >= 1.0 boundary (Min SL Floor {min_sl_dist:.2f})"
+                        "reason": f"Entry price {wholesale.recommended_entry} fails Wholesale / R:R >= {min_rr:.2f} boundary (Min SL Floor {min_sl_dist:.2f})"
                     })
                     continue
 
@@ -344,8 +496,12 @@ class EvaluateEntryUseCase:
 
                 if fixed_lot and float(fixed_lot) > 0:
                     lot_total = float(fixed_lot)
-                    lot_p1 = round(lot_total * 0.5, 2)
-                    lot_p2 = round(lot_total - lot_p1, 2)
+                    if lot_total < 0.02:
+                        lot_p1 = lot_total
+                        lot_p2 = 0.0
+                    else:
+                        lot_p1 = round(lot_total * 0.5, 2)
+                        lot_p2 = round(lot_total - lot_p1, 2)
                 else:
                     lot_total, lot_p1, lot_p2 = RiskManager.calculate_lot_size(
                         balance=balance,
@@ -367,32 +523,19 @@ class EvaluateEntryUseCase:
                     continue
                 elif lot_multiplier < 1.0:
                     lot_total = max(round(lot_total * lot_multiplier, 2), 0.01)
-                    lot_p1 = round(lot_total * 0.5, 2)
-                    lot_p2 = round(lot_total - lot_p1, 2)
+                    if lot_total < 0.02:
+                        lot_p1 = lot_total
+                        lot_p2 = 0.0
+                    else:
+                        lot_p1 = round(lot_total * 0.5, 2)
+                        lot_p2 = round(lot_total - lot_p1, 2)
 
                 if lot_total <= 0:
                     continue
 
-                # 7. Smart Order Dispatch (Live MT5 Compatible)
-                # Compare recommended entry with current market price:
-                # If market price is at or better than wholesale recommended entry -> MARKET entry
-                # If market price is approaching -> LIMIT pending entry
-                trade_id = f"ytc_{int(time.time()*1000)}"
-
-                if side == OrderSide.BUY:
-                    if current_price <= wholesale.recommended_entry + profile.min_buffer_points:
-                        order_type = "MARKET"
-                        order_price = current_price
-                    else:
-                        order_type = "LIMIT"
-                        order_price = wholesale.recommended_entry
-                else:
-                    if current_price >= wholesale.recommended_entry - profile.min_buffer_points:
-                        order_type = "MARKET"
-                        order_price = current_price
-                    else:
-                        order_type = "LIMIT"
-                        order_price = wholesale.recommended_entry
+                # 7. Check if price is currently touching entry zone (using adaptive touch tolerance)
+                touch_tolerance = max(profile.min_buffer_points, min(atr_1m * 0.35, profile.min_buffer_points * 1.5))
+                is_touched = (current_price <= wholesale.recommended_entry + touch_tolerance) if side == OrderSide.BUY else (current_price >= wholesale.recommended_entry - touch_tolerance)
 
                 # Guard: Do not enter if market price already invalidates SL
                 if side == OrderSide.BUY and current_price <= actual_sl:
@@ -400,239 +543,377 @@ class EvaluateEntryUseCase:
                 if side == OrderSide.SELL and current_price >= actual_sl:
                     continue
 
-                # ================================================================
-                # 8. Pre-Entry Validation: 3-LAYER GATE
-                # ================================================================
-                enable_ai_pre_entry = exec_rules.get("enable_ai_pre_entry", risk_mgmt.get("enable_ai_pre_entry", True))
-                min_ai_confidence = float(exec_rules.get("min_ai_confidence", risk_mgmt.get("min_ai_confidence", 0.65)))
-                layer2_threshold = float(exec_rules.get("layer2_threshold", 0.70))
-                ai_eval = None
+                if is_touched:
+                    return await self._execute_market_trade(
+                        config=config,
+                        setup_name=setup_name,
+                        side=side,
+                        current_price=current_price,
+                        actual_sl=actual_sl,
+                        actual_tp1=actual_tp1,
+                        actual_tp2=actual_tp2,
+                        lot_total=lot_total,
+                        lot_p1=lot_p1,
+                        lot_p2=lot_p2,
+                        wholesale=wholesale,
+                        anchor_id=anchor_id,
+                        spatial_anchor_key=spatial_anchor_key,
+                        stall_low=stall_low,
+                        stall_high=stall_high,
+                        trend=trend,
+                        bars_m1=bars_m1,
+                        bars_m3=bars_m3,
+                        risk_limit=risk_limit,
+                        profile=profile,
+                        macro_bias=macro_bias
+                    )
+                else:
+                    # Approaching entry -> DO NOT PLACE LIMIT ORDER TO BROKER/MT5!
+                    if setup_name == "TREND_BAR_FAIL":
+                        max_bars_pending = 3
+                    elif setup_name in ["YUM_YUM", "INSIDE_BAR_SMA21", "ID_NR4", "NR7_EMA20"]:
+                        max_bars_pending = 5
+                    else:
+                        max_bars_pending = 5
 
-                # ------ LAYER 2: Deterministic Scorer (0 tokens) ------
-                det_result = PreEntryScorer.evaluate(
-                    setup=setup_name,
-                    side=side.value,
-                    regime=config.market_regime.value,
-                    wholesale=wholesale.__dict__,
-                    macro_bias=macro_bias,
-                    profile=profile,
-                    lesson_rules=self.compiled_lesson_rules,
-                    threshold=layer2_threshold,
-                )
-
-                score_log = PreEntryScorer.score_summary(det_result)
-                print(f"[LAYER2] {setup_name} {side.value}: {score_log}")
-
-                if not det_result.approved:
-                    await self.event_bus.publish("telemetry", {
-                        "type": "LAYER2_REJECTED",
-                        "setup": setup_name,
-                        "side": side.value,
-                        "price": order_price,
-                        "det_score": det_result.score,
-                        "reason": det_result.rejection_reason,
-                        "triggered_rules": det_result.triggered_lesson_rules,
-                        "message": (
-                            f"⚡ [L2] Từ chối {setup_name} {side.value} (score={det_result.score:.2f}): "
-                            f"{det_result.rejection_reason}"
-                        )
-                    })
-                    continue  # ← Không tốn 1 token AI nào
-
-                # ------ LAYER 3: AI Deep Validation (compact prompt, chỉ khi L2 pass) ------
-                if enable_ai_pre_entry and self.ai_engine:
-                    await self.event_bus.publish("telemetry", {
-                        "type": "AI_PRE_ENTRY_EVALUATING",
-                        "setup": setup_name,
-                        "side": side.value,
-                        "price": order_price,
-                        "det_score": det_result.score,
-                        "message": (
-                            f"🤖 [L3] AI đánh giá {setup_name} {side.value} tại {order_price} "
-                            f"(L2 score={det_result.score:.2f})..."
-                        )
-                    })
-
-                    # Compact context — det_score nhúng vào để AI biết bối cảnh
-                    candidate_ctx = {
+                    self.candidate_setup = {
                         "symbol": config.symbol,
-                        "setup": setup_name,
-                        "side": side.value,
-                        "order_type": order_type,
-                        "order_price": order_price,
+                        "session_id": config.session_id,
+                        "session_tag": config.session_tag,
+                        "market_regime": config.market_regime,
+                        "setup_name": setup_name,
+                        "side": side,
+                        "entry_price": wholesale.recommended_entry,
                         "sl": actual_sl,
                         "tp1": actual_tp1,
                         "tp2": actual_tp2,
-                        "wholesale": wholesale.__dict__,
-                        "stall_range": {"low": stall_low, "high": stall_high},
-                        "det_score": round(det_result.score, 3),  # Layer 2 score cho AI tham khảo
-                        "nearest_zones": [
-                            {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low}
-                            for z in (config.resistance_zones + config.support_zones)
-                        ]
+                        "lot_total": lot_total,
+                        "lot_p1": lot_p1,
+                        "lot_p2": lot_p2,
+                        "wholesale": wholesale,
+                        "anchor_id": anchor_id,
+                        "spatial_anchor_key": spatial_anchor_key,
+                        "stall_low": stall_low,
+                        "stall_high": stall_high,
+                        "trend": trend.value if hasattr(trend, "value") else str(trend),
+                        "max_bars_pending": max_bars_pending,
+                        "bars_waiting": 0,
+                        "last_bar_timestamp": bars_m1[-1].timestamp if bars_m1 else time.time(),
+                        "risk_limit": risk_limit,
+                        "macro_bias": macro_bias,
+                        "created_time": time.time()
                     }
-
-                    trading_cfg_dict = {
-                        "symbol": config.symbol,
-                        "market_regime": config.market_regime.value,
-                        "setups_enabled": config.setups_enabled
-                    }
-
-                    recent_snapshot = {
-                        "m1_last_5": [{"open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m1[-5:] if len(bars_m1) >= 5 else bars_m1)],
-                        "m3_last_3": [{"open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m3[-3:] if len(bars_m3) >= 3 else bars_m3)]
-                    }
-
-                    try:
-                        ai_eval = await asyncio.wait_for(
-                            self.ai_engine.evaluate_candidate_trade(candidate_ctx, trading_cfg_dict, recent_snapshot),
-                            timeout=4.0
-                        )
-                    except asyncio.TimeoutError:
-                        print(f"[ENGINE] AI Pre-entry evaluation timed out (>4.0s) for {setup_name}.")
-                        fallback_policy = exec_rules.get("ai_timeout_policy", "ALLOW")
-                        if fallback_policy == "REJECT":
-                            await self.event_bus.publish("telemetry", {
-                                "type": "AI_ENTRY_VETOED",
-                                "setup": setup_name,
-                                "side": side.value,
-                                "price": order_price,
-                                "message": f"🚫 Điểm vào {setup_name} {side.value} bị hủy do AI phản hồi quá thời gian cho phép (>4s)."
-                            })
-                            continue
-                    except Exception as e:
-                        print(f"[ENGINE] AI Pre-entry evaluation error: {e}")
-
-                    if ai_eval:
-                        if not ai_eval.approved or ai_eval.confidence < min_ai_confidence:
-                            await self.event_bus.publish("telemetry", {
-                                "type": "AI_ENTRY_VETOED",
-                                "setup": setup_name,
-                                "side": side.value,
-                                "price": order_price,
-                                "confidence": ai_eval.confidence,
-                                "det_score": det_result.score,
-                                "reason": ai_eval.reason,
-                                "concerns": ai_eval.concerns,
-                                "message": f"🚫 AI TỪ CHỐI điểm vào {setup_name} {side.value}! Lý do: {ai_eval.reason} (Độ tin cậy: {ai_eval.confidence*100:.0f}%)"
-                            })
-                            print(f"[AI_GATEKEEPER] VETOED entry {setup_name} {side.value} at {order_price}: {ai_eval.reason}")
-                            continue
-                        else:
-                            await self.event_bus.publish("telemetry", {
-                                "type": "AI_ENTRY_APPROVED",
-                                "setup": setup_name,
-                                "side": side.value,
-                                "price": order_price,
-                                "confidence": ai_eval.confidence,
-                                "det_score": det_result.score,
-                                "reason": ai_eval.reason,
-                                "message": f"✅ AI PHÊ DUYỆT điểm vào {setup_name} {side.value}! (Độ tin cậy: {ai_eval.confidence*100:.0f}%) - {ai_eval.reason}"
-                            })
-                            print(f"[AI_GATEKEEPER] APPROVED entry {setup_name} {side.value} at {order_price} ({ai_eval.confidence*100:.0f}%): {ai_eval.reason}")
-
-
-
-                # Send order to Broker (Live MT5 or Paper)
-                order_ticket = await self.broker.place_order(
-                    symbol=config.symbol,
-                    side=side,
-                    order_type=order_type,
-                    volume=lot_total,
-                    price=order_price,
-                    sl=actual_sl,
-                    tp=actual_tp1,
-                    comment=f"{trade_id}_{setup_name}"
-                )
-
-                # CRITICAL: If Broker rejected order, do NOT create phantom trade!
-                if not order_ticket:
+                    dist_pts = round(abs(current_price - wholesale.recommended_entry), 2)
                     await self.event_bus.publish("telemetry", {
-                        "type": "ORDER_FAILED",
+                        "type": "CANDIDATE_SETUP_DETECTED",
+                        "symbol": config.symbol,
                         "setup": setup_name,
-                        "reason": "Broker rejected order (check MT5 terminal AlgoTrading status)"
+                        "side": side.value,
+                        "entry": wholesale.recommended_entry,
+                        "current_price": current_price,
+                        "dist": dist_pts,
+                        "sl": actual_sl,
+                        "tp1": actual_tp1,
+                        "message": f"⏳ Phát hiện setup {setup_name} {side.value} tại {wholesale.recommended_entry:.2f}. Máy chủ đang rình chờ giá chạm entry để bắn lệnh thị trường (cách {dist_pts:.2f} pts)..."
                     })
-                    continue
-
-                # Mark anchor as consumed so price wiggles won't re-trigger
-                self.consumed_anchors.add(anchor_id)
-                self.total_session_trades += 1
-
-                entry_context = {
-                    "symbol": config.symbol,
-                    "session_id": config.session_id,
-                    "session_tag": config.session_tag,
-                    "market_regime": config.market_regime.value,
-                    "trend": trend.value if hasattr(trend, "value") else str(trend),
-                    "setup": setup_name,
-                    "side": side.value,
-                    "order_type": order_type,
-                    "order_price": order_price,
-                    "sl": actual_sl,
-                    "tp1": actual_tp1,
-                    "tp2": actual_tp2,
-                    "wholesale": wholesale.__dict__,
-                    "stall_range": {"low": stall_low, "high": stall_high},
-                    "nearest_zones": [
-                        {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low, "significance": z.significance.value if hasattr(z.significance, "value") else str(z.significance)}
-                        for z in (config.resistance_zones + config.support_zones)
-                    ],
-                    "total_volume": lot_total,
-                    "lots": {"total": lot_total, "p1": lot_p1, "p2": lot_p2},
-                    "risk_percent": risk_limit,
-                    "timestamp": time.time(),
-                    "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                    "ai_pre_evaluation": {
-                        "approved": ai_eval.approved,
-                        "confidence": ai_eval.confidence,
-                        "reason": ai_eval.reason,
-                        "model_name": ai_eval.model_name
-                    } if ai_eval else None
-                }
-
-                initial_state = PositionState.IN_POSITION if order_type == "MARKET" else PositionState.PENDING_ENTRY
-
-                # Calculate Time-In-Force (Order Expiry Bars) according to Vol 5 Spec
-                if setup_name == "TREND_BAR_FAIL":
-                    max_bars_pending = 1  # Strict 1-bar expiry for counter-trend trap
-                elif setup_name == "YUM_YUM":
-                    max_bars_pending = 3  # Max 3-bar expiry for momentum continuation breakout
-                elif setup_name in ["INSIDE_BAR_SMA21", "ID_NR4", "NR7_EMA20"]:
-                    max_bars_pending = 3
-                else:
-                    max_bars_pending = None
-
-                lifecycle = TradeLifecycle(
-                    trade_id=trade_id,
-                    symbol=config.symbol,
-                    setup_type=SetupType(setup_name),
-                    side=side,
-                    state=initial_state,
-                    part1=PositionPart(1, lot_p1, order_price, actual_sl, actual_tp1, ticket=order_ticket),
-                    part2=PositionPart(2, lot_p2, order_price, actual_sl, actual_tp2, ticket=order_ticket),
-                    open_time=time.time(),
-                    limit_order_ticket=order_ticket if order_type == "LIMIT" else None,
-                    stop_order_ticket=None,
-                    m1_bars_in_trade=0,
-                    last_bar_timestamp=bars_m1[-1].timestamp if bars_m1 else None,
-                    anchor_id=anchor_id,
-                    spatial_anchor_key=spatial_anchor_key,
-                    max_bars_pending=max_bars_pending,
-                    entry_context=entry_context
-                )
-
-                await self.event_bus.publish("trade_opened", {
-                    "trade_id": trade_id,
-                    "setup": setup_name,
-                    "side": side.value,
-                    "type": order_type,
-                    "ticket": order_ticket,
-                    "wholesale": wholesale.__dict__,
-                    "lots": {"total": lot_total, "p1": lot_p1, "p2": lot_p2},
-                    "anchor_id": anchor_id
-                })
-
-                print(f"[ENGINE] Trade Executed: {trade_id} [{setup_name} {side.value} {order_type} ticket={order_ticket} anchor={anchor_id}]")
-                return lifecycle
+                    print(f"[ENGINE] Candidate Setup Detected: {setup_name} {side.value} at {wholesale.recommended_entry} (Current: {current_price}, dist: {dist_pts}). Watching for touch...")
+                    return None
 
         return None
+
+    async def _execute_market_trade(
+        self,
+        config: SessionConfig,
+        setup_name: str,
+        side: OrderSide,
+        current_price: float,
+        actual_sl: float,
+        actual_tp1: float,
+        actual_tp2: float,
+        lot_total: float,
+        lot_p1: float,
+        lot_p2: float,
+        wholesale: Any,
+        anchor_id: str,
+        spatial_anchor_key: str,
+        stall_low: float,
+        stall_high: float,
+        trend: Any,
+        bars_m1: List[Bar],
+        bars_m3: List[Bar],
+        risk_limit: float,
+        profile: Any,
+        macro_bias: str = "NEUTRAL"
+    ) -> Optional[TradeLifecycle]:
+        risk_mgmt = config.risk_management or {}
+        exec_rules = config.execution_rules or {}
+        order_price = current_price
+        ws_dict = wholesale.__dict__ if hasattr(wholesale, "__dict__") else wholesale
+
+        # 8. Pre-Entry Validation: 3-LAYER GATE
+        enable_ai_pre_entry = exec_rules.get("enable_ai_pre_entry", risk_mgmt.get("enable_ai_pre_entry", True))
+        min_ai_confidence = float(exec_rules.get("min_ai_confidence", risk_mgmt.get("min_ai_confidence", 0.75)))
+        layer2_threshold = float(exec_rules.get("layer2_threshold", 0.80))
+        ai_eval = None
+
+        # ------ LAYER 2: Deterministic Scorer (0 tokens) ------
+        det_result = PreEntryScorer.evaluate(
+            setup=setup_name,
+            side=side.value,
+            regime=config.market_regime.value,
+            wholesale=ws_dict,
+            macro_bias=macro_bias,
+            profile=profile,
+            lesson_rules=self.compiled_lesson_rules,
+            threshold=layer2_threshold,
+        )
+
+        score_log = PreEntryScorer.score_summary(det_result)
+        print(f"[LAYER2] {setup_name} {side.value}: {score_log}")
+
+        if not det_result.approved:
+            await self.event_bus.publish("telemetry", {
+                "type": "LAYER2_REJECTED",
+                "setup": setup_name,
+                "side": side.value,
+                "price": order_price,
+                "det_score": det_result.score,
+                "reason": det_result.rejection_reason,
+                "triggered_rules": det_result.triggered_lesson_rules,
+                "message": (
+                    f"⚡ [L2] Từ chối {setup_name} {side.value} (score={det_result.score:.2f}): "
+                    f"{det_result.rejection_reason}"
+                )
+            })
+            self.candidate_setup = None
+            return None
+
+        # ------ LAYER 3: AI Deep Validation (compact prompt, chỉ khi L2 pass) ------
+        if enable_ai_pre_entry and self.ai_engine:
+            await self.event_bus.publish("telemetry", {
+                "type": "AI_PRE_ENTRY_EVALUATING",
+                "symbol": config.symbol,
+                "setup": setup_name,
+                "side": side.value,
+                "entry": order_price,
+                "det_score": det_result.score,
+                "model": getattr(self.ai_engine, "model_name", "AI"),
+                "message": (
+                    f"🤖 [L3] AI đánh giá {setup_name} {side.value} tại {order_price} "
+                    f"(L2 score={det_result.score:.2f})..."
+                )
+            })
+
+            candidate_ctx = {
+                "symbol": config.symbol,
+                "setup": setup_name,
+                "side": side.value,
+                "order_type": "MARKET",
+                "order_price": order_price,
+                "sl": actual_sl,
+                "tp1": actual_tp1,
+                "tp2": actual_tp2,
+                "wholesale": ws_dict,
+                "stall_range": {"low": stall_low, "high": stall_high},
+                "det_score": round(det_result.score, 3),
+                "nearest_zones": [
+                    {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low}
+                    for z in (config.resistance_zones + config.support_zones)
+                ]
+            }
+
+            trading_cfg_dict = {
+                "symbol": config.symbol,
+                "market_regime": config.market_regime.value,
+                "setups_enabled": config.setups_enabled
+            }
+
+            recent_snapshot = {
+                "m1_last_5": [{"open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m1[-5:] if len(bars_m1) >= 5 else bars_m1)],
+                "m3_last_3": [{"open": b.open, "high": b.high, "low": b.low, "close": b.close} for b in (bars_m3[-3:] if len(bars_m3) >= 3 else bars_m3)]
+            }
+
+            try:
+                ai_eval = await asyncio.wait_for(
+                    self.ai_engine.evaluate_candidate_trade(candidate_ctx, trading_cfg_dict, recent_snapshot),
+                    timeout=4.0
+                )
+            except asyncio.TimeoutError:
+                print(f"[ENGINE] AI Pre-entry evaluation timed out (>4.0s) for {setup_name}.")
+                fallback_policy = exec_rules.get("ai_timeout_policy", "REJECT")
+                if fallback_policy == "REJECT":
+                    await self.event_bus.publish("telemetry", {
+                        "type": "AI_ENTRY_VETOED",
+                        "symbol": config.symbol,
+                        "setup": setup_name,
+                        "side": side.value,
+                        "entry": order_price,
+                        "confidence": 0.0,
+                        "reason": ">4s timeout (REJECT policy)",
+                        "policy": fallback_policy,
+                        "message": f"🚫 Điểm vào {setup_name} {side.value} bị hủy do AI phản hồi quá thời gian cho phép (>4s)."
+                    })
+                    self.candidate_setup = None
+                    return None
+            except Exception as e:
+                print(f"[ENGINE] AI Pre-entry evaluation error: {e}")
+
+            if ai_eval:
+                if not ai_eval.approved or ai_eval.confidence < min_ai_confidence:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "AI_ENTRY_VETOED",
+                        "symbol": config.symbol,
+                        "setup": setup_name,
+                        "side": side.value,
+                        "entry": order_price,
+                        "confidence": ai_eval.confidence,
+                        "det_score": det_result.score,
+                        "reason": ai_eval.reason,
+                        "concerns": ai_eval.concerns,
+                        "message": f"🚫 AI TỪ CHỐI điểm vào {setup_name} {side.value}! Lý do: {ai_eval.reason} (Độ tin cậy: {ai_eval.confidence*100:.0f}%)"
+                    })
+                    print(f"[AI_GATEKEEPER] VETOED entry {setup_name} {side.value} at {order_price}: {ai_eval.reason}")
+                    self.candidate_setup = None
+                    return None
+                else:
+                    await self.event_bus.publish("telemetry", {
+                        "type": "AI_ENTRY_APPROVED",
+                        "symbol": config.symbol,
+                        "setup": setup_name,
+                        "side": side.value,
+                        "entry": order_price,
+                        "confidence": ai_eval.confidence,
+                        "det_score": det_result.score,
+                        "reason": ai_eval.reason,
+                        "message": f"✅ AI PHÊ DUYỆT điểm vào {setup_name} {side.value}! (Độ tin cậy: {ai_eval.confidence*100:.0f}%) - {ai_eval.reason}"
+                    })
+                    print(f"[AI_GATEKEEPER] APPROVED entry {setup_name} {side.value} at {order_price} ({ai_eval.confidence*100:.0f}%): {ai_eval.reason}")
+
+        trade_id = f"ytc_{int(time.time()*1000)}"
+
+        # Dispatch MARKET orders directly to Broker
+        if lot_p2 > 0:
+            ticket_p1 = await self.broker.place_order(
+                symbol=config.symbol,
+                side=side,
+                order_type="MARKET",
+                volume=lot_p1,
+                price=order_price,
+                sl=actual_sl,
+                tp=actual_tp1,
+                comment=f"{trade_id}_P1_{setup_name}"
+            )
+            if not ticket_p1:
+                await self.event_bus.publish("telemetry", {
+                    "type": "ORDER_FAILED",
+                    "setup": setup_name,
+                    "reason": "Broker rejected Part 1 order (check MT5 terminal AlgoTrading status)"
+                })
+                self.candidate_setup = None
+                return None
+
+            ticket_p2 = await self.broker.place_order(
+                symbol=config.symbol,
+                side=side,
+                order_type="MARKET",
+                volume=lot_p2,
+                price=order_price,
+                sl=actual_sl,
+                tp=actual_tp2,
+                comment=f"{trade_id}_P2_{setup_name}"
+            )
+            if not ticket_p2:
+                ticket_p2 = None
+                lot_p2 = 0.0
+                lot_total = lot_p1
+        else:
+            ticket_p1 = await self.broker.place_order(
+                symbol=config.symbol,
+                side=side,
+                order_type="MARKET",
+                volume=lot_total,
+                price=order_price,
+                sl=actual_sl,
+                tp=actual_tp1,
+                comment=f"{trade_id}_{setup_name}"
+            )
+            if not ticket_p1:
+                await self.event_bus.publish("telemetry", {
+                    "type": "ORDER_FAILED",
+                    "setup": setup_name,
+                    "reason": "Broker rejected order (check MT5 terminal AlgoTrading status)"
+                })
+                self.candidate_setup = None
+                return None
+            ticket_p2 = None
+
+        self.consumed_anchors.add(anchor_id)
+        self.total_session_trades += 1
+        self.candidate_setup = None
+
+        trend_str = trend.value if hasattr(trend, "value") else str(trend)
+        entry_context = {
+            "symbol": config.symbol,
+            "session_id": config.session_id,
+            "session_tag": config.session_tag,
+            "market_regime": config.market_regime.value,
+            "trend": trend_str,
+            "setup": setup_name,
+            "side": side.value,
+            "order_type": "MARKET",
+            "order_price": order_price,
+            "sl": actual_sl,
+            "tp1": actual_tp1,
+            "tp2": actual_tp2,
+            "wholesale": ws_dict,
+            "stall_range": {"low": stall_low, "high": stall_high},
+            "nearest_zones": [
+                {"id": z.id, "type": getattr(z, "zone_type", "S/R"), "high": z.high, "low": z.low, "significance": z.significance.value if hasattr(z.significance, "value") else str(z.significance)}
+                for z in (config.resistance_zones + config.support_zones)
+            ],
+            "total_volume": lot_total,
+            "lots": {"total": lot_total, "p1": lot_p1, "p2": lot_p2},
+            "risk_percent": risk_limit,
+            "timestamp": time.time(),
+            "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "ai_pre_evaluation": {
+                "approved": ai_eval.approved,
+                "confidence": ai_eval.confidence,
+                "reason": ai_eval.reason,
+                "model_name": ai_eval.model_name
+            } if ai_eval else None
+        }
+
+        lifecycle = TradeLifecycle(
+            trade_id=trade_id,
+            symbol=config.symbol,
+            setup_type=SetupType(setup_name),
+            side=side,
+            state=PositionState.IN_POSITION,
+            part1=PositionPart(1, lot_p1, order_price, actual_sl, actual_tp1, ticket=ticket_p1),
+            part2=PositionPart(2, lot_p2, order_price, actual_sl, actual_tp2, ticket=ticket_p2 or ticket_p1),
+            open_time=time.time(),
+            limit_order_ticket=None,
+            stop_order_ticket=None,
+            m1_bars_in_trade=0,
+            last_bar_timestamp=bars_m1[-1].timestamp if bars_m1 else None,
+            anchor_id=anchor_id,
+            spatial_anchor_key=spatial_anchor_key,
+            max_bars_pending=None,
+            entry_context=entry_context
+        )
+
+        await self.event_bus.publish("trade_opened", {
+            "trade_id": trade_id,
+            "setup": setup_name,
+            "side": side.value,
+            "type": "MARKET",
+            "ticket": ticket_p1,
+            "ticket_p2": ticket_p2,
+            "wholesale": ws_dict,
+            "lots": {"total": lot_total, "p1": lot_p1, "p2": lot_p2},
+            "anchor_id": anchor_id
+        })
+
+        print(f"[ENGINE] Trade Executed: {trade_id} [{setup_name} {side.value} MARKET ticket1={ticket_p1} ticket2={ticket_p2} anchor={anchor_id}]")
+        return lifecycle

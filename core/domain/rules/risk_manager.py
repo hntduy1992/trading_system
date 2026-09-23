@@ -1,10 +1,14 @@
 """
 Risk Management Engine & Position Allocation
 Section 2.3 & 2.4 of YTC Specification
+
+Extended with:
+  - calculate_lot_for_min_profit(): wraps DynamicLotSizer for min-NET-profit sizing
 """
 import math
 from typing import Tuple, Optional, Dict, Any
 from core.domain.models import OrderSide, PositionPart, PositionState, TradeLifecycle
+from core.domain.rules.dynamic_lot_sizer import DynamicLotSizer, LotCalculationResult
 
 class RiskManager:
     @staticmethod
@@ -34,11 +38,15 @@ class RiskManager:
 
         # Normalize to lot_step and clamp by min_lot
         steps = math.floor(lot_raw / lot_step)
-        lot_total = max(steps * lot_step, min_lot * 2.0)
+        lot_total = max(steps * lot_step, min_lot)
         lot_total = round(lot_total, 2)
 
-        lot_p1 = round(lot_total * 0.5, 2)
-        lot_p2 = round(lot_total - lot_p1, 2)
+        if lot_total < min_lot * 2.0:
+            lot_p1 = lot_total
+            lot_p2 = 0.0
+        else:
+            lot_p1 = round(lot_total * 0.5, 2)
+            lot_p2 = round(lot_total - lot_p1, 2)
 
         return lot_total, lot_p1, lot_p2
 
@@ -103,6 +111,11 @@ class RiskManager:
         if bars_in_trade < grace_period_bars:
             return False, "PREMISE_INTACT (Grace Period Active)"
 
+        # Trades with strong profit (>= 1.0R or >= 70% towards T1) should NEVER be scratched on timeout.
+        # Scratch timeout is strictly reserved for stalled trades hovering near entry.
+        if unrealized_r >= 1.0 or price_progress_pct >= 0.70:
+            return False, "PREMISE_INTACT (In Strong Profit - Running to Target)"
+
         # Dynamic timeout extension if position is progressing in profit towards T1
         effective_timeout = scratch_timeout_bars
         if unrealized_r >= 0.3 or price_progress_pct >= 0.40:
@@ -113,3 +126,59 @@ class RiskManager:
 
         return False, "PREMISE_INTACT"
 
+    # ------------------------------------------------------------------
+    # Module 3 integration: lot sizing for minimum NET profit target
+    # ------------------------------------------------------------------
+    @staticmethod
+    def calculate_lot_for_min_profit(
+        entry: float,
+        t1: float,
+        sl: float,
+        balance: float,
+        min_net_profit_usd: float = 2.0,
+        risk_pct: float = 1.0,
+        min_lot: float = 0.01,
+        max_lot: float = 1.0,
+    ) -> LotCalculationResult:
+        """
+        Wrapper around DynamicLotSizer that calculates the lot size required
+        to achieve a minimum NET profit (after spread + commission) on XAUUSD.
+
+        This is the preferred sizing method for live trading when the account
+        is small (< $1,000) and spread costs are significant relative to
+        the gross profit target.
+
+        Parameters
+        ----------
+        entry             : Entry price
+        t1                : First take-profit target
+        sl                : Stop-loss price
+        balance           : Current account balance (USD)
+        min_net_profit_usd: Minimum acceptable net P&L per trade (default $2)
+        risk_pct          : Maximum risk as % of balance (default 1%)
+        min_lot           : Broker minimum lot size (default 0.01)
+        max_lot           : Hard cap on lot size (default 1.0)
+
+        Returns
+        -------
+        LotCalculationResult – use .lot_size for position sizing,
+                               .is_feasible to gate trade entry.
+
+        Example
+        -------
+        >>> result = RiskManager.calculate_lot_for_min_profit(
+        ...     entry=4344.0, t1=4348.0, sl=4342.0, balance=400.0
+        ... )
+        >>> if result.is_feasible:
+        ...     place_order(lot=result.lot_size)
+        """
+        return DynamicLotSizer.calculate_lot_for_net_profit(
+            entry=entry,
+            t1=t1,
+            sl=sl,
+            balance=balance,
+            min_net_profit_usd=min_net_profit_usd,
+            risk_pct=risk_pct,
+            min_lot=min_lot,
+            max_lot=max_lot,
+        )

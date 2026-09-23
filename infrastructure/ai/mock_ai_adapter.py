@@ -25,21 +25,21 @@ class MockAIEngine(IAIEngine):
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         session_id = f"sess_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # Determine regime and trend based on recent M3 and M30 rates
+        # Determine regime and trend based on recent M3 and HTF (M15/M30) rates
         from core.domain.models import Bar, get_instrument_profile
         from core.domain.rules.swing_detector import SwingDetector
         profile = get_instrument_profile(symbol)
 
-        m30_list = recent_rates_json.get("M30", [])
+        htf_list = recent_rates_json.get("M15") or recent_rates_json.get("M30", [])
         m3_list = recent_rates_json.get("M3", [])
 
-        bars_m30 = [Bar(timestamp=b["time"], open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=100, timeframe="M30") for b in m30_list]
+        bars_htf = [Bar(timestamp=b["time"], open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=100, timeframe="M15") for b in htf_list]
         bars_m3 = [Bar(timestamp=b["time"], open=b["o"], high=b["h"], low=b["l"], close=b["c"], volume=100, timeframe="M3") for b in m3_list]
 
         if m3_list:
             curr_price = m3_list[-1]["c"]
-        elif m30_list:
-            curr_price = m30_list[-1]["c"]
+        elif htf_list:
+            curr_price = htf_list[-1]["c"]
         else:
             curr_price = profile.base_price
 
@@ -93,19 +93,19 @@ class MockAIEngine(IAIEngine):
 
         digits = profile.digits
 
-        if m30_list:
-            session_high = max(b["h"] for b in m30_list)
-            session_low = min(b["l"] for b in m30_list)
+        if htf_list:
+            session_high = max(b["h"] for b in htf_list)
+            session_low = min(b["l"] for b in htf_list)
             zone_width = max((session_high - session_low) * 0.05, profile.sr_proximity_points * 1.5)
         else:
             session_high = curr_price + profile.default_t2_points
             session_low = curr_price - profile.default_t2_points
             zone_width = profile.sr_proximity_points * 1.5
 
-        # Extract real structural S/R zones from M30 / M3 swings
-        swings_30m = SwingDetector.detect_swings(bars_m30) if bars_m30 else []
-        sh_above = [s for s in (swings_30m or swings_3m) if s.price > curr_price]
-        sl_below = [s for s in (swings_30m or swings_3m) if s.price < curr_price]
+        # Extract real structural S/R zones from HTF (M15/M30) / M3 swings
+        swings_htf = SwingDetector.detect_swings(bars_htf) if bars_htf else []
+        sh_above = [s for s in (swings_htf or swings_3m) if s.price > curr_price]
+        sl_below = [s for s in (swings_htf or swings_3m) if s.price < curr_price]
 
         # Resistance zones
         if sh_above:
@@ -140,29 +140,55 @@ class MockAIEngine(IAIEngine):
             HTFZone(id="sup_min_1", high=sup_min_high, low=sup_min_low, significance=Significance.MINOR, zone_type="SUPPORT")
         ]
 
+        from config import CONFIG
         execution_rules = {
-            "min_rr_ratio_part1": 1.0,
-            "require_wholesale_entry": True,
-            "max_entry_timeout_bars_1m": 4,
-            "stall_min_candles": 3,
-            "scratch_timeout_bars_1m": 5,
+            "min_rr_ratio_part1": getattr(CONFIG.risk, "MIN_RR_RATIO_PART1", 0.75),
+            "require_wholesale_entry": getattr(CONFIG.risk, "REQUIRE_WHOLESALE_ENTRY", True),
+            "max_entry_timeout_bars_1m": getattr(CONFIG.risk, "MAX_ENTRY_TIMEOUT_BARS_1M", 4),
+            "stall_min_candles": getattr(CONFIG.risk, "STALL_MIN_CANDLES", 3),
+            "scratch_timeout_bars_1m": getattr(CONFIG.risk, "SCRATCH_TIMEOUT_BARS_1M", 5),
             "slippage_tolerance_pips": profile.slippage_tolerance_pips
         }
 
-
         risk_management = {
-            "account_risk_limit_percent": 1.0,
-            "part1_risk_percent": 0.5,
-            "part2_risk_percent": 0.5,
-            "session_drawdown_timeout_percent": 2.0,
-            "session_drawdown_hardstop_percent": 3.0,
-            "business_drawdown_stop_percent": 20.0
+            "account_risk_limit_percent": getattr(CONFIG.risk, "ACCOUNT_RISK_LIMIT_PERCENT", 1.0),
+            "part1_risk_percent": getattr(CONFIG.risk, "PART1_RISK_PERCENT", 0.5),
+            "part2_risk_percent": getattr(CONFIG.risk, "PART2_RISK_PERCENT", 0.5),
+            "session_drawdown_timeout_percent": getattr(CONFIG.risk, "SESSION_DRAWDOWN_TIMEOUT_PERCENT", 2.0),
+            "session_drawdown_hardstop_percent": getattr(CONFIG.risk, "SESSION_DRAWDOWN_HARDSTOP_PERCENT", 3.0),
+            "business_drawdown_stop_percent": getattr(CONFIG.risk, "BUSINESS_DRAWDOWN_STOP_PERCENT", 20.0),
+            "min_rr_ratio": getattr(CONFIG.risk, "MIN_RR_RATIO_PART1", 0.75),
+            "sl_multiplier": getattr(CONFIG.risk, "SL_MULTIPLIER", 1.20),
+            "tp_multiplier": getattr(CONFIG.risk, "TP_MULTIPLIER", 0.90)
         }
 
+        # Build blackout windows from economic events
+        blackout_windows = []
+        for ev in (economic_events or []):
+            ev_ts = ev.get("timestamp", 0.0)
+            impact = str(ev.get("impact", "")).upper()
+            if impact in ["HIGH", "MEDIUM"] and ev_ts > 0:
+                s_ts = ev_ts - 20 * 60
+                e_ts = ev_ts + 20 * 60
+                blackout_windows.append({
+                    "event_id": ev.get("id"),
+                    "title": ev.get("title"),
+                    "impact": impact,
+                    "start_ts": s_ts,
+                    "end_ts": e_ts,
+                    "event_ts": ev_ts,
+                    "start_str": datetime.datetime.fromtimestamp(s_ts).strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_str": datetime.datetime.fromtimestamp(e_ts).strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_str": ev.get("datetime_str", "")
+                })
+
         news_filter = {
-            "blackout_before_minutes": 15,
-            "blackout_after_minutes": 15,
-            "high_impact_events": economic_events
+            "blackout_before_minutes": 20,
+            "blackout_after_minutes": 20,
+            "high_impact_events": economic_events or [],
+            "blackout_windows": blackout_windows,
+            "macro_bias": "NEUTRAL",
+            "lot_multiplier": 1.0
         }
 
         return SessionConfig(

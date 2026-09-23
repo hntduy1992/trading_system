@@ -10,14 +10,15 @@ from core.domain.rules.vector_dynamics import MicroPatternDetector
 def _calc_thresholds(bars_1m: List[Bar], profile: Optional[InstrumentProfile] = None) -> Tuple[float, float, float]:
     atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
     if profile:
+        min_p = getattr(profile, "min_profit_points", 1.0)
         prox = max(profile.sr_proximity_points, atr * 0.3)
-        t1_dist = max(profile.default_t1_points, atr * 1.5)
-        t2_dist = max(profile.default_t2_points, atr * 3.5)
+        t1_dist = max(profile.default_t1_points, min_p, atr * 1.5)
+        t2_dist = max(profile.default_t2_points, min_p * 3.0, atr * 3.5)
     else:
         last_price = bars_1m[-1].close if bars_1m else 1.0
         prox = max(last_price * 0.0005, atr * 0.3)
-        t1_dist = max(last_price * 0.0020, atr * 1.5)
-        t2_dist = max(last_price * 0.0040, atr * 3.5)
+        t1_dist = max(last_price * 0.0020, 1.0, atr * 1.5)
+        t2_dist = max(last_price * 0.0040, 3.0, atr * 3.5)
     return prox, t1_dist, t2_dist
 
 def _is_tst_reaction(bars_1m: List[Bar], side: OrderSide, atr: float) -> bool:
@@ -118,7 +119,8 @@ class TSTSetup(BaseSetup):
                     if not _is_tst_reaction(bars_1m, OrderSide.BUY, atr):
                         continue
                     recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
-                    t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
+                    raw_t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
+                    t1 = max(curr_price + t1_dist, min(raw_t1, curr_price + t1_dist * 1.5))
                     t2 = resistance_zones[0].low if resistance_zones else (curr_price + t2_dist)
                     pullback_swing = sup.low
                     return True, OrderSide.BUY, pullback_swing, t1, t2
@@ -132,7 +134,8 @@ class TSTSetup(BaseSetup):
                     if not _is_tst_reaction(bars_1m, OrderSide.SELL, atr):
                         continue
                     recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
-                    t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
+                    raw_t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
+                    t1 = min(curr_price - t1_dist, max(raw_t1, curr_price - t1_dist * 1.5))
                     t2 = support_zones[0].high if support_zones else (curr_price - t2_dist)
                     pullback_swing = res.high
                     return True, OrderSide.SELL, pullback_swing, t1, t2
@@ -165,7 +168,8 @@ class BOFSetup(BaseSetup):
             for sup in support_zones:
                 if MicroPatternDetector.detect_spring(curr_bar, sup.low):
                     recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
-                    t1 = recent_sh[-1].price if recent_sh else (curr_bar.close + t1_dist)
+                    raw_t1 = recent_sh[-1].price if recent_sh else (curr_bar.close + t1_dist)
+                    t1 = max(curr_bar.close + t1_dist, min(raw_t1, curr_bar.close + t1_dist * 1.5))
                     t2 = resistance_zones[0].low if resistance_zones else (curr_bar.close + t2_dist)
                     return True, OrderSide.BUY, curr_bar.low, t1, t2
 
@@ -174,7 +178,8 @@ class BOFSetup(BaseSetup):
             for res in resistance_zones:
                 if MicroPatternDetector.detect_upthrust(curr_bar, res.high):
                     recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
-                    t1 = recent_sl[-1].price if recent_sl else (curr_bar.close - t1_dist)
+                    raw_t1 = recent_sl[-1].price if recent_sl else (curr_bar.close - t1_dist)
+                    t1 = min(curr_bar.close - t1_dist, max(raw_t1, curr_bar.close - t1_dist * 1.5))
                     t2 = support_zones[0].high if support_zones else (curr_bar.close - t2_dist)
                     return True, OrderSide.SELL, curr_bar.high, t1, t2
 
@@ -245,15 +250,39 @@ class PBSetup(BaseSetup):
 
         if "UPTREND" in trend and last_swing.swing_type == SwingType.SWING_LOW:
             recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
-            t1 = recent_sh[-1].price
+            raw_t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
+            t1 = max(curr_price + t1_dist, min(raw_t1, curr_price + t1_dist * 1.5))
             t2 = resistance_zones[0].low if resistance_zones else (t1 + t2_dist)
-            return True, OrderSide.BUY, last_swing.price, t1, t2
+
+            pullback_swing = last_swing.price
+            atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
+            max_sl_dist = max(profile.min_sl_points * 2.8, atr * 2.5) if profile else (atr * 2.5)
+            if (curr_price - pullback_swing) > max_sl_dist and len(bars_1m) >= 6:
+                recent_m1 = bars_1m[-12:]
+                micro_low = min(b.low for b in recent_m1[:-1])
+                min_dist = profile.min_sl_points if profile else (atr * 1.5)
+                if (curr_price - micro_low) >= min_dist:
+                    pullback_swing = micro_low
+
+            return True, OrderSide.BUY, pullback_swing, t1, t2
 
         if "DOWNTREND" in trend and last_swing.swing_type == SwingType.SWING_HIGH:
             recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
-            t1 = recent_sl[-1].price
+            raw_t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
+            t1 = min(curr_price - t1_dist, max(raw_t1, curr_price - t1_dist * 1.5))
             t2 = support_zones[0].high if support_zones else (t1 - t2_dist)
-            return True, OrderSide.SELL, last_swing.price, t1, t2
+
+            pullback_swing = last_swing.price
+            atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
+            max_sl_dist = max(profile.min_sl_points * 2.8, atr * 2.5) if profile else (atr * 2.5)
+            if (pullback_swing - curr_price) > max_sl_dist and len(bars_1m) >= 6:
+                recent_m1 = bars_1m[-12:]
+                micro_high = max(b.high for b in recent_m1[:-1])
+                min_dist = profile.min_sl_points if profile else (atr * 1.5)
+                if (micro_high - curr_price) >= min_dist:
+                    pullback_swing = micro_high
+
+            return True, OrderSide.SELL, pullback_swing, t1, t2
 
         return False, None, None, None, None
 
@@ -282,14 +311,38 @@ class CPBSetup(BaseSetup):
 
         if "UPTREND" in trend and last_swing.swing_type == SwingType.SWING_LOW:
             recent_sh = [s for s in swings_3m if s.swing_type == SwingType.SWING_HIGH]
-            t1 = recent_sh[-1].price
+            raw_t1 = recent_sh[-1].price if recent_sh else (curr_price + t1_dist)
+            t1 = max(curr_price + t1_dist, min(raw_t1, curr_price + t1_dist * 1.5))
             t2 = resistance_zones[0].low if resistance_zones else (t1 + t2_dist)
-            return True, OrderSide.BUY, min(last_swing.price, prior_swing.price), t1, t2
+
+            pullback_swing = min(last_swing.price, prior_swing.price)
+            atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
+            max_sl_dist = max(profile.min_sl_points * 2.8, atr * 2.5) if profile else (atr * 2.5)
+            if (curr_price - pullback_swing) > max_sl_dist and len(bars_1m) >= 6:
+                recent_m1 = bars_1m[-12:]
+                micro_low = min(b.low for b in recent_m1[:-1])
+                min_dist = profile.min_sl_points if profile else (atr * 1.5)
+                if (curr_price - micro_low) >= min_dist:
+                    pullback_swing = micro_low
+
+            return True, OrderSide.BUY, pullback_swing, t1, t2
 
         if "DOWNTREND" in trend and last_swing.swing_type == SwingType.SWING_HIGH:
             recent_sl = [s for s in swings_3m if s.swing_type == SwingType.SWING_LOW]
-            t1 = recent_sl[-1].price
+            raw_t1 = recent_sl[-1].price if recent_sl else (curr_price - t1_dist)
+            t1 = min(curr_price - t1_dist, max(raw_t1, curr_price - t1_dist * 1.5))
             t2 = support_zones[0].high if support_zones else (t1 - t2_dist)
-            return True, OrderSide.SELL, max(last_swing.price, prior_swing.price), t1, t2
+
+            pullback_swing = max(last_swing.price, prior_swing.price)
+            atr = MicroPatternDetector.calculate_atr(bars_1m, period=14)
+            max_sl_dist = max(profile.min_sl_points * 2.8, atr * 2.5) if profile else (atr * 2.5)
+            if (pullback_swing - curr_price) > max_sl_dist and len(bars_1m) >= 6:
+                recent_m1 = bars_1m[-12:]
+                micro_high = max(b.high for b in recent_m1[:-1])
+                min_dist = profile.min_sl_points if profile else (atr * 1.5)
+                if (micro_high - curr_price) >= min_dist:
+                    pullback_swing = micro_high
+
+            return True, OrderSide.SELL, pullback_swing, t1, t2
 
         return False, None, None, None, None

@@ -212,54 +212,137 @@ class MT5Broker(IBrokerGateway):
         res = mt5.order_send(request)
         return bool(res and res.retcode == mt5.TRADE_RETCODE_DONE)
 
+    async def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        if not self.connected or not MT5_AVAILABLE:
+            return []
+        positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+        if positions is None:
+            return []
+        res = []
+        for p in positions:
+            res.append({
+                "ticket": p.ticket,
+                "symbol": p.symbol,
+                "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                "volume": p.volume,
+                "price_open": p.price_open,
+                "sl": p.sl,
+                "tp": p.tp,
+                "price_current": p.price_current,
+                "profit": p.profit,
+                "time": p.time,
+                "magic": p.magic,
+                "comment": p.comment,
+                "identifier": getattr(p, "identifier", p.ticket)
+            })
+        return res
+
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        if not self.connected or not MT5_AVAILABLE:
+            return []
+        orders = mt5.orders_get(symbol=symbol) if symbol else mt5.orders_get()
+        if orders is None:
+            return []
+        res = []
+        for o in orders:
+            res.append({
+                "ticket": o.ticket,
+                "symbol": o.symbol,
+                "type": o.type,
+                "volume_initial": o.volume_initial,
+                "volume_current": o.volume_current,
+                "price_open": o.price_open,
+                "sl": o.sl,
+                "tp": o.tp,
+                "time_setup": o.time_setup,
+                "magic": o.magic,
+                "comment": o.comment
+            })
+        return res
+
     async def close_position(self, ticket: int, volume: Optional[float] = None) -> bool:
-        if not self.connected:
+        if not self.connected or not MT5_AVAILABLE:
             return False
 
-        # 1. Try finding position by ticket
+        # 1. Try finding position by ticket or identifier or comment
         pos = mt5.positions_get(ticket=ticket)
         if not pos:
-            # 2. Try finding positions with our magic number
-            all_magic_pos = mt5.positions_get(magic=2102026)
-            if all_magic_pos:
-                pos = all_magic_pos
+            all_pos = mt5.positions_get() or ()
+            matched = [
+                p for p in all_pos
+                if p.ticket == ticket or getattr(p, "identifier", 0) == ticket or (p.comment and str(ticket) in p.comment)
+            ]
+            if matched:
+                pos = matched
 
         if not pos:
-            print(f"[MT5Broker] Position ticket {ticket} not found to close.")
+            # Check if this ticket is actually an unfilled pending order
+            pending_orders = mt5.orders_get(ticket=ticket)
+            if pending_orders:
+                print(f"[MT5Broker] Ticket {ticket} is a pending order. Cancelling order instead.")
+                return await self.cancel_order(ticket)
+            print(f"[MT5Broker] Position ticket {ticket} not found to close (may already be closed on MT5).")
             return False
 
         p = pos[0]
         close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        tick = mt5.symbol_info_tick(p.symbol)
-        if not tick:
-            return False
-        price = tick.bid if p.type == mt5.POSITION_TYPE_BUY else tick.ask
-        vol = volume or p.volume
+        vol = min(volume, p.volume) if volume else p.volume
+        vol = round(vol, 2)
+        if vol <= 0:
+            return True
 
         info = mt5.symbol_info(p.symbol)
         filling_mode = info.filling_mode if info else 1
-        fill_mode = mt5.ORDER_FILLING_IOC if (filling_mode & 2) else (mt5.ORDER_FILLING_FOK if (filling_mode & 1) else mt5.ORDER_FILLING_RETURN)
-
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": p.ticket,
-            "symbol": p.symbol,
-            "volume": float(vol),
-            "type": close_type,
-            "price": price,
-            "deviation": 20,
-            "magic": 2102026,
-            "comment": "YTC_CLOSE",
-            "type_filling": fill_mode
-        }
-        res = mt5.order_send(request)
-        success = bool(res and res.retcode == mt5.TRADE_RETCODE_DONE)
-        if success:
-            print(f"[MT5Broker] Successfully closed position {p.ticket} (vol={vol})")
+        if filling_mode & 2:
+            candidate_fillings = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        elif filling_mode & 1:
+            candidate_fillings = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
         else:
-            err = res.comment if res else mt5.last_error()
-            print(f"[MT5Broker] Failed to close position {p.ticket}: {err}")
-        return success
+            candidate_fillings = [mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
+
+        # Retry loop: up to 3 attempts with fresh tick price and progressive deviation
+        deviations = [25, 50, 100]
+        for attempt, dev in enumerate(deviations, 1):
+            tick = mt5.symbol_info_tick(p.symbol)
+            if not tick:
+                import asyncio
+                await asyncio.sleep(0.1)
+                continue
+            price = tick.bid if p.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+            for fill_mode in candidate_fillings:
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "position": p.ticket,
+                    "symbol": p.symbol,
+                    "volume": float(vol),
+                    "type": close_type,
+                    "price": price,
+                    "deviation": dev,
+                    "magic": 2102026,
+                    "comment": "YTC_CLOSE",
+                    "type_filling": fill_mode
+                }
+                res = mt5.order_send(request)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"[MT5Broker] Successfully closed position {p.ticket} (vol={vol}, attempt={attempt}, dev={dev})")
+                    return True
+                elif res and res.retcode == 10030:
+                    # Unsupported filling mode, try next filling mode
+                    continue
+                elif res and res.retcode in [10004, 10021]:
+                    # Requote / No quote: retry immediately with fresh price
+                    break
+                else:
+                    err = res.comment if res else mt5.last_error()
+                    print(f"[MT5Broker] Attempt {attempt} to close position {p.ticket} failed: retcode={res.retcode if res else 'None'}, {err}")
+                    break
+
+            import asyncio
+            await asyncio.sleep(0.15)
+
+        print(f"[MT5Broker ❌] FAILED to close position {p.ticket} after {len(deviations)} attempts.")
+        return False
 
     async def modify_position(self, ticket: int, sl: float, tp: float) -> bool:
         if not self.connected:
@@ -267,9 +350,10 @@ class MT5Broker(IBrokerGateway):
         # 1. Check if it's an open position
         pos = mt5.positions_get(ticket=ticket)
         if not pos:
-            all_magic = mt5.positions_get(magic=2102026)
-            if all_magic:
-                pos = all_magic
+            all_pos = mt5.positions_get() or ()
+            matched = [p for p in all_pos if p.ticket == ticket or getattr(p, "identifier", 0) == ticket]
+            if matched:
+                pos = matched
 
         if pos:
             p = pos[0]
@@ -299,6 +383,7 @@ class MT5Broker(IBrokerGateway):
             return bool(res and res.retcode == mt5.TRADE_RETCODE_DONE)
 
         return False
+
 
     async def get_terminal_status(self) -> Dict[str, Any]:
         """Check live connection and AutoTrading status in MT5."""
